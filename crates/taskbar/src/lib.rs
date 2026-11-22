@@ -147,7 +147,8 @@ struct State {
     resolver: Resolver,
     tray: Option<HWND>,
     move_hook: Option<HWINEVENTHOOK>,
-    desktop_focused: bool,
+    /// The lyrics wallpaper is in view on the main screen (`syllable_core::wallpaper_view`).
+    wallpaper_in_view: bool,
     track_key: Option<String>,
     /// Layout pass wanted now (an event moved something).
     relayout: bool,
@@ -194,7 +195,7 @@ fn run(ctx: Context, events: Receiver<Event>, ready: std::sync::mpsc::Sender<isi
         }),
         tray: None,
         move_hook: None,
-        desktop_focused: false,
+        wallpaper_in_view: syllable_core::wallpaper_view::in_view(),
         track_key: None,
         relayout: true,
         last_layout: Instant::now(),
@@ -354,7 +355,9 @@ impl State {
 
     fn apply_wanted(&mut self) {
         let c = &self.cfg;
-        let a = self.lyrics.set_wanted(c.lyrics_enabled && !(c.lyrics_hide_on_desktop && self.desktop_focused));
+        // "Hide while the desktop is showing" only when the lyrics wallpaper is really
+        // there to show them instead: with the wallpaper off (or covered) the strip stays.
+        let a = self.lyrics.set_wanted(c.lyrics_enabled && !(c.lyrics_hide_on_desktop && self.wallpaper_in_view));
         let b = self.app.set_wanted(c.app_name_enabled);
         if a || b {
             self.relayout = true; // a strip coming back needs its window placed again
@@ -370,6 +373,15 @@ impl State {
                     // The lyrics belong to the old song; new ones follow on the bus.
                     self.track_key = key;
                     self.lyrics.set_lyrics(None);
+                }
+            }
+            Event::WallpaperInView(v) => {
+                if v != self.wallpaper_in_view {
+                    self.wallpaper_in_view = v;
+                    if self.cfg.lyrics_hide_on_desktop && self.cfg.lyrics_enabled {
+                        log!("taskbar: lyrics wallpaper {}", if v { "in view, fading the lyrics out" } else { "out of view, showing the lyrics" });
+                    }
+                    self.apply_wanted();
                 }
             }
             Event::ConfigChanged => {
@@ -408,13 +420,6 @@ impl State {
     }
 
     fn on_foreground_resolved(&mut self, fg: app_name::Foreground) {
-        if fg.desktop != self.desktop_focused {
-            self.desktop_focused = fg.desktop;
-            if self.cfg.lyrics_hide_on_desktop {
-                log!("taskbar: desktop {}", if fg.desktop { "focused, hiding lyrics" } else { "left, showing lyrics" });
-            }
-            self.apply_wanted();
-        }
         self.app.set_name(Some(fg.name));
     }
 

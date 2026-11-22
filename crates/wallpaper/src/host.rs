@@ -60,6 +60,8 @@ static CONTROL: AtomicIsize = AtomicIsize::new(0);
 /// Progman as last seen, for the WinEvent filter.
 static PROGMAN: AtomicIsize = AtomicIsize::new(0);
 static DESKTOP_PENDING: AtomicBool = AtomicBool::new(false);
+/// A foreground or minimise/restore event queued a sync that has not run yet.
+static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
 static QUIT: AtomicBool = AtomicBool::new(false);
 
 // The static WebView2 loader (shipped inside webview2-com-sys, whose build script puts
@@ -176,6 +178,12 @@ fn run(ctx: Context) -> anyhow::Result<()> {
         CONTROL.store(control.0 as isize, Ordering::SeqCst);
         HOST.with(|h| *h.borrow_mut() = Some(Host::new(ctx)));
         SetTimer(Some(control), TIMER_TICK, 1000, None);
+        // Show desktop, focus moves and minimise/restore change whether the wallpaper
+        // is in view: look again at once instead of on the next tick.
+        let view_hooks = [
+            SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_view_event), 0, 0, WINEVENT_OUTOFCONTEXT),
+            SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_view_event), 0, 0, WINEVENT_OUTOFCONTEXT),
+        ];
         post(WM_APP_SYNC);
         if QUIT.load(Ordering::SeqCst) {
             post(WM_APP_QUIT);
@@ -185,6 +193,11 @@ fn run(ctx: Context) -> anyhow::Result<()> {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        for h in view_hooks {
+            if !h.is_invalid() {
+                let _ = UnhookWinEvent(h);
+            }
         }
         HOST.with(|h| h.borrow_mut().take());
         CONTROL.store(0, Ordering::SeqCst);
@@ -219,6 +232,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             return LRESULT(0);
         }
         WM_APP_SYNC | WM_DISPLAYCHANGE if is_control => {
+            SYNC_PENDING.store(false, Ordering::SeqCst);
             with_host(Host::sync);
             return LRESULT(0);
         }
@@ -271,6 +285,21 @@ unsafe extern "system" fn on_win_event(
     }
 }
 
+/// Foreground changes and minimise/restore anywhere: one sync per burst.
+unsafe extern "system" fn on_view_event(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if !SYNC_PENDING.swap(true, Ordering::SeqCst) {
+        post(WM_APP_SYNC);
+    }
+}
+
 enum EnvState {
     NotStarted,
     Pending,
@@ -307,6 +336,8 @@ struct Host {
     seen_explorer: bool,
     syncing: bool,
     was_enabled: Option<bool>,
+    /// What was last published as `Event::WallpaperInView`.
+    in_view: Option<bool>,
 }
 
 impl Host {
@@ -328,6 +359,7 @@ impl Host {
             seen_explorer: false,
             syncing: false,
             was_enabled: None,
+            in_view: None,
         }
     }
 
@@ -367,7 +399,28 @@ impl Host {
                 }
             }
         }
+        self.publish_in_view(enabled && !self.unavailable);
         self.syncing = false;
+    }
+
+    /// Whether the lyrics wallpaper is in view on the main screen (where the taskbar
+    /// lyrics are): its page is loaded there and the desktop shows. Published on change.
+    fn publish_in_view(&mut self, running: bool) {
+        let in_view = running
+            && monitors().iter().find(|m| m.bounds.left == 0 && m.bounds.top == 0).is_some_and(|mon| {
+                self.screens.get(&mon.name).is_some_and(|s| s.ready)
+                    && (desktop_in_front() || desktop_clear(&covering_candidates(), &mon.work))
+            });
+        if self.in_view == Some(in_view) {
+            return;
+        }
+        let first = self.in_view.is_none();
+        self.in_view = Some(in_view);
+        syllable_core::wallpaper_view::set(in_view);
+        if !first || in_view {
+            log!("wallpaper host: lyrics wallpaper {} on the main screen", if in_view { "in view" } else { "out of view" });
+        }
+        self.ctx.bus.publish(Event::WallpaperInView(in_view));
     }
 
     fn drain(&mut self) {
@@ -463,6 +516,9 @@ impl Host {
         }
 
         let covering = covering_candidates();
+        // Show desktop leaves windows up (not minimised), only behind the desktop: the
+        // wallpaper is in plain sight then, so nothing counts as covering it.
+        let shown = desktop_in_front();
         for mon in &monitors {
             if !self.screens.contains_key(&mon.name) {
                 match self.create_screen(env, mon, parent, def_view) {
@@ -477,7 +533,7 @@ impl Host {
             }
             let s = self.screens.get_mut(&mon.name).unwrap();
             attach(s, parent, def_view, mon.bounds);
-            let by = covered_by(&covering, &mon.work);
+            let by = if shown { None } else { covered_by(&covering, &mon.work) };
             set_covered(s, by);
         }
     }
@@ -964,6 +1020,28 @@ fn covered_by(windows: &[(HWND, RECT)], work: &RECT) -> Option<HWND> {
         .map(|(h, _)| *h)
 }
 
+/// No window covers a real part of this work area: everything is minimised or hidden.
+/// Specks (a 2x2 helper window, a tray flyout's shadow) don't count.
+fn desktop_clear(windows: &[(HWND, RECT)], work: &RECT) -> bool {
+    let area = |r: &RECT| ((r.right - r.left).max(0) as i64) * ((r.bottom - r.top).max(0) as i64);
+    let limit = area(work) / 50;
+    !windows.iter().any(|(_, r)| {
+        let x = RECT {
+            left: r.left.max(work.left),
+            top: r.top.max(work.top),
+            right: r.right.min(work.right),
+            bottom: r.bottom.min(work.bottom),
+        };
+        area(&x) > limit
+    })
+}
+
+/// The desktop itself has the foreground: Show desktop (Win+D), or a click on it.
+fn desktop_in_front() -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    !fg.0.is_null() && matches!(class_of(fg).as_str(), "Progman" | "WorkerW")
+}
+
 fn class_of(h: HWND) -> String {
     let mut buf = [0u16; 256];
     let n = unsafe { GetClassNameW(h, &mut buf) };
@@ -995,6 +1073,19 @@ mod tests {
     fn page_urls_are_escaped_file_urls() {
         let u = page_url(std::path::Path::new(r"D:\projects\lyrics spicy\a#b\index.html"), "DISPLAY1", 9012);
         assert_eq!(u, "file:///D:/projects/lyrics%20spicy/a%23b/index.html?screen=DISPLAY1&port=9012");
+    }
+
+    #[test]
+    fn clear_only_when_nothing_real_overlaps() {
+        let work = RECT { left: 0, top: 48, right: 1920, bottom: 1080 };
+        let h = HWND(std::ptr::null_mut());
+        let speck = (h, RECT { left: 78, top: 114, right: 80, bottom: 116 });
+        let offscreen = (h, RECT { left: -32000, top: -32000, right: -31984, bottom: -31984 });
+        let notepad = (h, RECT { left: 156, top: 228, right: 1596, bottom: 981 });
+        let other_monitor = (h, RECT { left: 1920, top: 0, right: 3840, bottom: 1080 });
+        assert!(desktop_clear(&[], &work));
+        assert!(desktop_clear(&[speck, offscreen, other_monitor], &work));
+        assert!(!desktop_clear(&[speck, notepad], &work));
     }
 
     #[test]

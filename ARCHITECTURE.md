@@ -45,11 +45,14 @@ Rules:
 - `Context { bus, config }`: cloneable handle given to every module.
 - `Bus::subscribe() -> Receiver<Event>` / `Bus::publish(Event)`. Events:
   `TrackChanged`, `TrackUpdated`, `Artwork`, `Lyrics`, `PlaybackChanged`,
-  `ConfigChanged`, `OpenSettings`, `AccountsCommand`, `AccountsChanged`, `NextWallpaper`, `Quit`
+  `ConfigChanged`, `OpenSettings`, `AccountsCommand`, `AccountsChanged`, `NextWallpaper`,
+  `WallpaperInView`, `Quit`
   (documented in `bus.rs`).
 - `position::{set, clear, now_ms, playing}`: the playback clock. `media` writes it;
   anything drawing lyrics reads `now_ms()` each frame and adds `GlobalOffsetMs`.
 - `audio::{set, latest}`: the latest spectrum frame, written by `audio`.
+- `wallpaper_view::{set, in_view}`: whether the lyrics wallpaper is in view on the main
+  screen, written by `wallpaper`'s host; the taskbar fades its lyrics out on it.
 - `ConfigStore::{read, snapshot, update}`: `update` saves and publishes `ConfigChanged`.
   The file is `%LOCALAPPDATA%\Syllable\config.json`, PascalCase keys.
 - `log!("…")` appends to `%LOCALAPPDATA%\Syllable\log.txt`.
@@ -75,6 +78,7 @@ workspace compiling when you save.
 | `AccountsCommand` | settings (tray, later) | lyrics |
 | `AccountsChanged` | lyrics | settings |
 | `NextWallpaper` | settings ("Next wallpaper" button) | wallpaper |
+| `WallpaperInView` | wallpaper (host) | taskbar |
 | `Quit` | app | every module |
 
 ## Accounts

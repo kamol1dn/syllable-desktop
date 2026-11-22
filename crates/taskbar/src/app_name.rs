@@ -1,5 +1,4 @@
-//! The active-app name strip, and the foreground watcher that also tells the lyric
-//! strip when the desktop itself has focus.
+//! The active-app name strip, and the foreground watcher behind it.
 //!
 //! Event driven: a WinEvent hook fires only when focus moves, so sitting in one app
 //! costs nothing. Names are resolved on a worker thread (reading another process's

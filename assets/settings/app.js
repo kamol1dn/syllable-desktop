@@ -435,7 +435,7 @@ function taskbarSection() {
     })),
     group('Lyrics strip',
       row('Show lyrics on the taskbar', null, toggle('LyricsEnabled')),
-      row('Hide while the desktop is showing', 'The lyrics wallpaper already shows them there.', toggle('LyricsHideOnDesktop'), { when: lyricsOn }),
+      row('Hide while the wallpaper shows them', 'Fades out on Show desktop or with every window minimised. Stays when the lyrics wallpaper is off.', toggle('LyricsHideOnDesktop'), { when: lyricsOn }),
       row('Attach', 'Sit inside the taskbar, or float just beside it.', segmented('Placement', PLACEMENTS), { when: lyricsOn }),
       row('Screen edge', null, segmented('VPos', EDGES), { when: lyricsOn }),
       row('Alignment', null, segmented('Align', ALIGNS), { when: lyricsOn }),

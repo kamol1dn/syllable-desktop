@@ -35,6 +35,10 @@ pub enum Event {
     /// The user asked for a different wallpaper image now (settings "Next wallpaper").
     /// Published by `syllable-settings`; handled by `syllable-wallpaper`.
     NextWallpaper,
+    /// The built-in lyrics wallpaper came into view on the main screen, or left it
+    /// (see `wallpaper_view`). Published by `syllable-wallpaper`'s host; the taskbar
+    /// fades its lyrics out while it is in view, when `LyricsHideOnDesktop` is on.
+    WallpaperInView(bool),
     /// The app is exiting: stop threads and destroy windows.
     Quit,
 }
