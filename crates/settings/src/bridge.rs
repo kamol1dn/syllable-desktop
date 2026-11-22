@@ -147,6 +147,19 @@ pub fn state_message(c: &Config, accounts: Value) -> Value {
         "collections": crate::actions::collections(&c.wallpaper_folder),
         "cache": crate::actions::cache_summary(),
         "accounts": accounts,
+        "lock": lock_state(c),
+    })
+}
+
+/// The lock screen is drawn by Aura Wallpaper loading our page from the local feed:
+/// whether Aura is installed, the address to give it, and whether the page is showing.
+fn lock_state(c: &Config) -> Value {
+    let status = syllable_core::surfaces::lock_status();
+    json!({
+        "auraInstalled": crate::actions::aura_installed(),
+        "url": format!("http://127.0.0.1:{}/lockscreen", c.port),
+        "open": status.open,
+        "lastSeen": status.last_seen,
     })
 }
 

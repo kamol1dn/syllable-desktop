@@ -100,7 +100,7 @@ pub fn run(ctx: Context, events: Receiver<Event>, open_now: Option<String>) {
         for event in events {
             match event {
                 Event::OpenSettings => post(WM_OPEN),
-                Event::ConfigChanged | Event::AccountsChanged => {
+                Event::ConfigChanged | Event::AccountsChanged | Event::SurfacesChanged => {
                     if !push_queued.swap(true, Ordering::AcqRel) {
                         post(WM_PUSH_STATE);
                     }
@@ -488,6 +488,11 @@ fn on_page_message(hwnd: HWND, webview: &ICoreWebView2, text: &str) {
                     send(webview, &bridge::toast(if ok { "Copied." } else { "Could not copy." }, if ok { "ok" } else { "error" }));
                 }
                 "refresh" => push_state(),
+                "openAuraStore" => {
+                    if !actions::open_aura_store() {
+                        send(webview, &bridge::toast("Could not open the Steam store.", "error"));
+                    }
+                }
                 other => log!("settings: unknown action {other}"),
             }
         }

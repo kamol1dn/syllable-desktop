@@ -193,9 +193,15 @@ const Bridge = (() => {
   function connect() {
     clearTimeout(timer);
     try {
-      // The host passes its monitor name, so the app can tell the pages apart.
+      // The host passes its monitor name, so the app can tell the pages apart; the
+      // surface tells it this is the lock-screen page (Settings shows whether it's up).
+      const q = new URLSearchParams();
       const screen = new URLSearchParams(location.search).get("screen");
-      ws = new WebSocket(`ws://127.0.0.1:${settings.port}/wallpaper` + (screen ? `?screen=${encodeURIComponent(screen)}` : ""));
+      if (screen) q.set("screen", screen);
+      q.set("surface", window.WALLPAPER_SURFACE);
+      // Served by the app itself (Aura loads http://127.0.0.1:<port>/lockscreen): use that port.
+      const port = location.protocol.startsWith("http") && location.port ? location.port : settings.port;
+      ws = new WebSocket(`ws://127.0.0.1:${port}/wallpaper?${q}`);
     } catch (e) {
       timer = setTimeout(connect, 3000);
       return;

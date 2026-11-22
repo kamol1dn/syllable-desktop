@@ -11,7 +11,7 @@ const host = window.chrome && window.chrome.webview;
 const send = (msg) => { if (host) host.postMessage(JSON.stringify(msg)); };
 
 let catalogue = { taskbar: [], desktop: [], lock: [], vizPresets: [] };
-let S = { config: null, active: {}, collections: [], cache: '', accounts: null };
+let S = { config: null, active: {}, collections: [], cache: '', accounts: null, lock: null };
 const refreshers = [];
 let lastResultSeq = null;
 
@@ -492,7 +492,7 @@ function wallpaperSection(id, surface, key, title, subtitle) {
           h('div', { class: 't' }, h('b', null, 'Show the lyrics wallpaper on the desktop'),
             h('span', null, 'Lyrics, cover and your wallpapers behind the desktop icons.')),
           toggle('WallpaperHostEnabled', 'Show the lyrics wallpaper on the desktop'))
-      : null,
+      : lockSetupGroup(),
     styleGrid(surface, wallpaperPreview, () => ({ ...get(key) })),
     group('Background',
       row('Background', 'Your own images, or a moving gradient made from the album art.',
@@ -520,6 +520,46 @@ function wallpaperSection(id, surface, key, title, subtitle) {
         slider(p('WallpaperBlur'), { min: 0, max: 24, step: 2, fmt: (v) => (v ? px(v) : 'Off') }), { when: hostOn }),
       row('Slow zoom drift', 'Images drift slowly instead of sitting still.', toggle(p('KenBurns')), { when: usesImages }),
       row('Gradient reacts to bass', 'The album gradient pulses with the music.', toggle(p('AudioReactive')), { when: hostOn })));
+}
+
+/** "5 min ago" for a Unix time in seconds. */
+function ago(unix) {
+  const s = Math.max(0, Date.now() / 1000 - unix);
+  if (s < 90) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const hrs = Math.round(m / 60);
+  if (hrs < 36) return `${hrs} h ago`;
+  return `${Math.round(hrs / 24)} days ago`;
+}
+
+/** Windows only lets special apps draw on the lock screen, so Aura Wallpaper shows our
+ *  lock page there, loaded by URL from the app's local server. */
+function lockSetupGroup() {
+  const L = () => S.lock || { auraInstalled: false, url: '', open: 0, lastSeen: null };
+  const auraPill = h('span', { class: 'pill' });
+  const getBtn = button('Get it on Steam', () => send({ type: 'action', name: 'openAuraStore' }), 'primary');
+  const url = h('code');
+  const copyBtn = h('button', { type: 'button', class: 'btn', style: 'height:26px;padding:0 9px;font-size:12px', onclick: () => copy(url.textContent) }, 'Copy');
+  const pagePill = h('span', { class: 'pill' });
+  onRefresh(() => {
+    const l = L();
+    auraPill.textContent = !S.lock ? 'Checking…' : l.auraInstalled ? 'Installed' : 'Not installed';
+    auraPill.className = `pill ${!S.lock ? 'wait' : l.auraInstalled ? 'on' : ''}`;
+    getBtn.style.display = S.lock && !l.auraInstalled ? '' : 'none';
+    url.textContent = l.url || `http://127.0.0.1:${get('Port') || 9012}/lockscreen`;
+    pagePill.textContent = l.open > 0 ? 'Showing now' : l.lastSeen ? `Last seen ${ago(l.lastSeen)}` : 'Not seen yet';
+    pagePill.className = `pill ${l.open > 0 ? 'on' : ''}`;
+  });
+  return group('Set up',
+    row('Aura Wallpaper', 'Windows only lets special apps draw on the lock screen. Syllable shows its lyrics there through Aura Wallpaper, from Steam.',
+      [auraPill, getBtn]),
+    row(null, null, h('ol', { class: 'steps' },
+      h('li', null, 'In Aura Wallpaper, open ', h('b', null, 'Lockscreen Wallpaper'), '.'),
+      h('li', null, 'Click ', h('b', null, 'URL'), ' and paste ', url, ' ', copyBtn),
+      h('li', null, 'Turn on ', h('b', null, 'Enable Lockscreen Wallpaper'), '.'),
+      h('li', null, 'Lock your PC once (Win + L). The status below then shows when it was last seen.')), { stacked: true }),
+    row('Lock screen page', 'Shows while Syllable is running. Changes below apply straight away, even while it is showing.', [pagePill]));
 }
 
 function accountsGroup() {
@@ -583,15 +623,42 @@ function accountsGroup() {
     redirect.textContent = sp.redirectUri ? sp.redirectUri.replace(/:\d+(?=\/)/, `:${port}`) : `http://127.0.0.1:${port}/callback`;
   });
 
-  return group('Accounts',
-    row('Spicy Lyrics API key', 'Your own key for word-by-word lyrics straight from Spicy Lyrics. Stored encrypted on this PC.',
-      [keyStatus]),
-    row(null, null, [keyInput, testBtn, saveBtn, removeBtn], { stacked: true }),
-    row('Spotify sign-in', 'Sign in to the Spotify web player for Spotify’s own lyrics and exact song matching.', [spStatus, spBtn]),
-    row('Your Spotify app', { node: ['Optional: exact song matching and the queue through your own app. Add ', redirect, ' ', copyBtn, ' as its redirect URI first.'] }, [appStatus]),
-    row(null, null, [idInput, connectBtn, cancelBtn, disconnectBtn], { stacked: true }),
-    row('Sign-in port', 'The local port Spotify sends you back to after connecting your app.',
-      number('SpotifyRedirectPort', { min: 1024, max: 65535, step: 1 })));
+  // What the user gets right now, from what is set up. Mirrors the resolver's order:
+  // Spicy (word timing) > Spotify (mostly line timing) > LRCLIB (line timing, always on).
+  const summary = h('div', { class: 'summary' });
+  onRefresh(() => {
+    const spicy = !!A().spicy.hasKey, spotify = !!A().spotify.signedIn;
+    const [lead, rest] = !ready() ? ['Checking your sources…', '']
+      : spicy && spotify ? ['Word-by-word lyrics from Spicy Lyrics.', 'Songs it doesn’t have come from Spotify, then LRCLIB.']
+      : spicy ? ['Word-by-word lyrics from Spicy Lyrics.', 'Songs it doesn’t have come from LRCLIB. Signing in to Spotify covers more of them.']
+      : spotify ? ['Spotify’s own lyrics, line by line.', 'Songs it doesn’t have come from LRCLIB. Add a Spicy Lyrics key for word-by-word timing.']
+      : ['Line-by-line lyrics from LRCLIB.', 'Add either source below for more songs; a Spicy Lyrics key adds word-by-word timing.'];
+    summary.replaceChildren(h('b', null, lead), rest ? h('span', null, rest) : null);
+  });
+  const tag = (label, cls) => h('i', { class: `tag ${cls || ''}` }, label);
+  const builtIn = h('span', { class: 'pill on' }, 'Always on');
+
+  return [
+    group('Lyrics sources',
+      h('div', { class: 'row intro' }, h('div', { class: 't' },
+        h('span', null, 'Lyrics work with no setup. Each source below is optional and works on its own: set up one, both or neither. When more than one has a song, the best timing wins.'),
+        summary)),
+      row(['Spicy Lyrics', tag('Word by word', 'best')],
+        'Lyrics that highlight each word as it’s sung. Needs your own API key; stored encrypted on this PC.',
+        [keyStatus]),
+      row(null, null, [keyInput, testBtn, saveBtn, removeBtn], { stacked: true }),
+      row(['Spotify', tag('Line by line')],
+        'Spotify’s own lyrics: just sign in with your Spotify account, nothing else to set up.',
+        [spStatus, spBtn]),
+      row(['LRCLIB', tag('Line by line')],
+        'A free community lyrics library, used for anything the sources above don’t have.',
+        [builtIn])),
+    group('Exact song matching (advanced)',
+      row('Your Spotify app', { node: ['Doesn’t add lyrics. Uses your own developer app to identify songs exactly and read the queue. Create one at developer.spotify.com with ', redirect, ' ', copyBtn, ' as its redirect URI, then paste its Client ID.'] }, [appStatus]),
+      row(null, null, [idInput, connectBtn, cancelBtn, disconnectBtn], { stacked: true }),
+      row('Sign-in port', 'The local port Spotify sends you back to after connecting your app.',
+        number('SpotifyRedirectPort', { min: 1024, max: 65535, step: 1 }))),
+  ];
 }
 
 function copy(textToCopy) {
@@ -605,7 +672,7 @@ function lyricsSection() {
         number('GlobalOffsetMs', { min: -5000, max: 5000, step: 50, unit: 'ms' })),
       row('Instrumental dots', 'Show ● ● ● when a gap between lines is at least this long.',
         number('InterludeGapMs', { min: 500, max: 20000, step: 250, unit: 'ms' }))),
-    accountsGroup(),
+    ...accountsGroup(),
     group('Cache',
       row('Lyrics cache', 'Lyrics are kept on this PC so a song you have played before loads instantly.',
         [live(() => S.cache), confirmButton('Clear', 'Clear the cache?', () => send({ type: 'action', name: 'clearCache' }))]),
@@ -658,7 +725,7 @@ function build(section) {
   document.getElementById('pages').replaceChildren(
     taskbarSection(),
     wallpaperSection('desktop', 'desktop', 'WallpaperDesktop', 'Desktop wallpaper', 'The lyrics wallpaper behind your windows.'),
-    wallpaperSection('lock', 'lock', 'WallpaperLock', 'Lock screen', 'The same wallpaper on the lock screen, with its own look.'),
+    wallpaperSection('lock', 'lock', 'WallpaperLock', 'Lock screen', 'Lyrics on the lock screen, shown through Aura Wallpaper, with their own look.'),
     lyricsSection(),
     aboutSection());
   show(section || 'taskbar', false);
@@ -676,7 +743,7 @@ function onMessage(msg) {
       break;
     case 'state': {
       const first = !S.config;
-      S = { config: msg.config, active: msg.active || {}, collections: msg.collections || [], cache: msg.cache || '', accounts: msg.accounts };
+      S = { config: msg.config, active: msg.active || {}, collections: msg.collections || [], cache: msg.cache || '', accounts: msg.accounts, lock: msg.lock || null };
       const r = S.accounts && S.accounts.result;
       if (r && lastResultSeq !== null && r.seq > lastResultSeq) toast(r.message, r.ok ? 'ok' : 'error');
       if (r || lastResultSeq === null) lastResultSeq = r ? r.seq : 0;

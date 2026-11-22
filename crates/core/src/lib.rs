@@ -10,6 +10,7 @@ pub mod log;
 pub mod matching;
 pub mod models;
 pub mod position;
+pub mod surfaces;
 pub mod wallpaper_view;
 
 pub use bus::{Bus, Event};

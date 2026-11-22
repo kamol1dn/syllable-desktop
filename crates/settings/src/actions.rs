@@ -192,3 +192,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Aura Wallpaper's Steam app id. Aura draws our lock-screen page on the lock screen.
+const AURA_STEAM_APP: &str = "2726120";
+
+/// Whether Aura Wallpaper is installed: Steam registers every installed game under
+/// `Uninstall\Steam App <id>`.
+pub fn aura_installed() -> bool {
+    use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+    let path = HSTRING::from(format!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {AURA_STEAM_APP}"));
+    let mut key = HKEY::default();
+    let found = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, &path, None, KEY_READ | KEY_WOW64_64KEY, &mut key) }.is_ok();
+    if found {
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+    }
+    found
+}
+
+/// Aura's Steam store page: in the Steam client when it's installed, else in the browser.
+pub fn open_aura_store() -> bool {
+    let open = |url: &str| {
+        let r = unsafe {
+            ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+        };
+        r.0 as isize > 32
+    };
+    open(&format!("steam://store/{AURA_STEAM_APP}")) || open(&format!("https://store.steampowered.com/app/{AURA_STEAM_APP}/"))
+}

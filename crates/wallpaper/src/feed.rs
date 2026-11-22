@@ -18,12 +18,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use syllable_core::{audio, log, position, Context, Event};
+use syllable_core::{audio, log, position, surfaces, Context, Event};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::StatusCode;
 use tungstenite::{Message, WebSocket};
 
-use crate::{images, protocol};
+use crate::{http, images, protocol};
 
 const POS_EVERY: Duration = Duration::from_millis(250);
 const AUDIO_EVERY: Duration = Duration::from_millis(33);
@@ -217,8 +217,9 @@ fn path_allowed(path: &str) -> bool {
     path.trim_end_matches('/').eq_ignore_ascii_case("/wallpaper")
 }
 
-fn handshake(stream: TcpStream) -> Option<(WebSocket<TcpStream>, String)> {
+fn handshake(stream: TcpStream) -> Option<(WebSocket<TcpStream>, String, String)> {
     let mut screen = String::new();
+    let mut surface = String::new();
     let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
         let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
         let refuse = |code: StatusCode| {
@@ -234,16 +235,15 @@ fn handshake(stream: TcpStream) -> Option<(WebSocket<TcpStream>, String)> {
             log!("wallpaper feed: refused origin {}", origin.unwrap_or("-"));
             return refuse(StatusCode::FORBIDDEN);
         }
-        screen = req
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("screen=")))
-            .unwrap_or("-")
-            .to_string();
+        let param = |name: &str| {
+            req.uri().query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix(name).map(str::to_string)))
+        };
+        screen = param("screen=").unwrap_or_else(|| "-".into());
+        surface = param("surface=").unwrap_or_default();
         Ok(resp)
     };
     let ws = tungstenite::accept_hdr(stream, check).ok()?;
-    Some((ws, screen))
+    Some((ws, screen, surface))
 }
 
 fn serve(shared: Arc<Shared>, stream: TcpStream) {
@@ -252,7 +252,16 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
-    let Some((mut ws, screen)) = handshake(stream) else { return };
+    // Plain HTTP requests are for the page files (Aura loads the lock page by URL);
+    // WebSocket upgrades are pages joining the feed.
+    let Some(head) = peek_head(&stream) else { return };
+    if !head.upgrade_websocket {
+        let root = crate::page_path().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        http::serve(stream, &head, root.as_deref());
+        return;
+    }
+    let Some((mut ws, screen, surface)) = handshake(stream) else { return };
+    let lock_page = surface.eq_ignore_ascii_case("lockscreen");
     let _ = ws.get_ref().set_read_timeout(Some(READ_SLICE));
 
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
@@ -272,11 +281,39 @@ fn serve(shared: Arc<Shared>, stream: TcpStream) {
         viewers.push((id, tx.clone()));
     }
     log!("wallpaper feed: page connected (screen {screen}, {} open)", shared.viewer_count());
+    if lock_page {
+        surfaces::lock_page_opened();
+        shared.ctx.bus.publish(Event::SurfacesChanged);
+    }
 
     let why = run(&shared, id, &mut ws, &rx, &tx);
     shared.want_audio(id, false);
     shared.state.lock().unwrap().1.retain(|(v, _)| *v != id);
     log!("wallpaper feed: page disconnected (screen {screen}: {why}, {} open)", shared.viewer_count());
+    if lock_page {
+        surfaces::lock_page_closed();
+        shared.ctx.bus.publish(Event::SurfacesChanged);
+    }
+}
+
+/// Look at the request head without consuming it, so a WebSocket handshake can still
+/// read it from the start.
+fn peek_head(stream: &TcpStream) -> Option<http::Head> {
+    let mut buf = [0u8; 8192];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = stream.peek(&mut buf).ok()?;
+        if n == 0 {
+            return None;
+        }
+        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+            return http::parse_head(&buf[..n]);
+        }
+        if n == buf.len() || Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn run(shared: &Shared, id: u64, ws: &mut WebSocket<TcpStream>, rx: &Receiver<Text>, tx: &Sender<Text>) -> String {
@@ -379,6 +416,45 @@ fn is_timeout(e: &tungstenite::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real path a connection takes: peek the head, see it isn't a WebSocket
+    /// upgrade, and answer it as a page request.
+    fn http_get(path: &str, host: &str) -> String {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let head = peek_head(&stream).expect("head");
+            assert!(!head.upgrade_websocket);
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..\\..\\assets\\wallpaper");
+            http::serve(stream, &head, Some(&root));
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        let host = host.replace("{port}", &addr.port().to_string());
+        client.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes()).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    #[test]
+    fn serves_the_lock_page_over_http() {
+        let r = http_get("/lockscreen", "127.0.0.1:{port}");
+        assert!(r.starts_with("HTTP/1.1 200 OK"), "{}", &r[..r.len().min(200)]);
+        assert!(r.contains("Content-Type: text/html"));
+        assert!(r.contains("Cache-Control: no-store"));
+        assert!(r.contains("window.WALLPAPER_SURFACE = \"lockscreen\""));
+        assert!(http_get("/js/app.js", "localhost:{port}").contains("Content-Type: text/javascript"));
+    }
+
+    #[test]
+    fn refuses_other_hosts_and_paths() {
+        assert!(http_get("/lockscreen", "evil.example:{port}").starts_with("HTTP/1.1 403"));
+        assert!(http_get("/../Cargo.toml", "127.0.0.1:{port}").starts_with("HTTP/1.1 404"));
+        assert!(http_get("/%2e%2e/%2e%2e/Cargo.toml", "127.0.0.1:{port}").starts_with("HTTP/1.1 404"));
+    }
 
     #[test]
     fn origins() {

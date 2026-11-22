@@ -15,6 +15,7 @@
 
 mod feed;
 mod host;
+mod http;
 pub mod images;
 pub mod protocol;
 

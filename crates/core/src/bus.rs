@@ -39,6 +39,9 @@ pub enum Event {
     /// The user asked for a different wallpaper image now (settings "Next wallpaper").
     /// Published by `syllable-settings`; handled by `syllable-wallpaper`.
     NextWallpaper,
+    /// The lock-screen page connected or left (see `surfaces`). Published by
+    /// `syllable-wallpaper`'s feed; Settings refreshes its lock-screen status.
+    SurfacesChanged,
     /// The built-in lyrics wallpaper came into view on the main screen, or left it
     /// (see `wallpaper_view`). Published by `syllable-wallpaper`'s host; the taskbar
     /// fades its lyrics out while it is in view, when `LyricsHideOnDesktop` is on.
