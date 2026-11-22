@@ -1,10 +1,14 @@
 //! The audio visualizer: a click-through, per-pixel-alpha strip along the
 //! taskbar edge of the primary screen, drawn with Direct2D.
 //!
-//! Like the prototype it is a top-level window kept at the very bottom of the
-//! z-order, so it only shows over the desktop and through a transparent taskbar;
-//! the taskbar's icons and the lyrics strip (a child of the taskbar) stay above it,
-//! and any app window in front hides it.
+//! Like the prototype it is a top-level window at the back of the z-order, so it
+//! only shows over the desktop and through a transparent taskbar; the taskbar's
+//! icons and the lyrics strip (a child of the taskbar) stay above it, and any app
+//! window in front hides it. "At the back" means directly above the desktop window
+//! (Progman), not `HWND_BOTTOM`: Show desktop lifts Progman over every app window,
+//! and the visualizer follows it there (re-checked after each foreground change), and
+//! back down when the windows return. Show desktop can also minimise it; it restores
+//! itself.
 //!
 //! Live settings (re-read on `Event::ConfigChanged`): `VizEnabled`, `VizPreset`,
 //! `VizRandomizeOnTrack`, `VizEdge`, `VizHeightFraction`, `VizOpacity`. Colours
@@ -48,6 +52,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::System::Threading::{
     CreateWaitableTimerExW, GetCurrentThreadId, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
     TIMER_ALL_ACCESS, INFINITE,
@@ -67,6 +72,8 @@ const MAINTAIN_TIMER: usize = 1;
 const MAINTAIN_MS: u32 = 2000;
 /// Posted to the UI thread when a bus event or a decoded palette is waiting.
 const WM_APP_WAKE: u32 = WM_APP + 1;
+/// Posted to the window when something minimised it, to bring it back.
+const WM_APP_UNMINIMIZE: u32 = WM_APP + 2;
 const DEMAND_NAME: &str = "visualizer";
 
 pub fn start(ctx: Context) -> Result<()> {
@@ -89,7 +96,13 @@ enum Wake {
 thread_local! {
     /// Set by the window procedure when the screen layout changed.
     static GEOMETRY_DIRTY: Cell<bool> = const { Cell::new(false) };
+    /// Keep re-checking our place above the desktop until then: set on foreground
+    /// changes, because Explorer lifts or drops Progman a moment after them.
+    static RESTACK_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
 }
+
+/// How long after a foreground change to keep following the desktop window.
+const RESTACK_WINDOW: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Geometry {
@@ -132,6 +145,8 @@ struct Viz {
     /// Bumped on every cover, so a slow decode of an old cover is ignored.
     cover_seq: u64,
     hwnd: Option<HWND>,
+    /// Foreground-change hook while the window exists.
+    fg_hook: HWINEVENTHOOK,
     renderer: Option<render::Renderer>,
     geometry: Option<Geometry>,
     last_audio: Option<Arc<AudioFrame>>,
@@ -197,6 +212,7 @@ fn run(ctx: Context, bus_events: Receiver<Event>) -> Result<()> {
         palette: Palette::default(),
         cover_seq: 0,
         hwnd: None,
+        fg_hook: HWINEVENTHOOK::default(),
         renderer: None,
         geometry: None,
         last_audio: None,
@@ -265,6 +281,13 @@ fn run(ctx: Context, bus_events: Receiver<Event>) -> Result<()> {
         }
         if GEOMETRY_DIRTY.replace(false) {
             viz.place();
+        } else if let Some(until) = RESTACK_UNTIL.get() {
+            if Instant::now() >= until {
+                RESTACK_UNTIL.set(None);
+            }
+            if let Some(hwnd) = viz.hwnd {
+                unsafe { stay_above_desktop(hwnd) };
+            }
         }
         #[cfg(debug_assertions)]
         viz.debug_tick();
@@ -351,8 +374,17 @@ impl Viz {
         self.renderer = Some(render::Renderer::new(hwnd, g.w as u32, g.h as u32)?);
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            send_to_bottom(hwnd);
+            stay_above_desktop(hwnd);
             SetTimer(Some(hwnd), MAINTAIN_TIMER, MAINTAIN_MS, None);
+            self.fg_hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(on_foreground),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
         }
         audio::demand(DEMAND_NAME, true);
         self.dirty = true;
@@ -364,6 +396,13 @@ impl Viz {
         audio::demand(DEMAND_NAME, false);
         self.renderer = None;
         self.last_audio = None;
+        if !self.fg_hook.is_invalid() {
+            unsafe {
+                let _ = UnhookWinEvent(self.fg_hook);
+            }
+            self.fg_hook = HWINEVENTHOOK::default();
+        }
+        RESTACK_UNTIL.set(None);
         if let Some(hwnd) = self.hwnd.take() {
             unsafe {
                 let _ = KillTimer(Some(hwnd), MAINTAIN_TIMER);
@@ -373,13 +412,13 @@ impl Viz {
         }
     }
 
-    /// Follow the screen: size, position, DPI, work area; and stay at the bottom.
+    /// Follow the screen: size, position, DPI, work area; and stay just above the desktop.
     fn place(&mut self) {
         let Some(hwnd) = self.hwnd else { return };
         let g = compute_geometry(self.settings.top, self.settings.height_fraction);
         if Some(g) != self.geometry {
             unsafe {
-                let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), g.x, g.y, g.w, g.h, SWP_NOACTIVATE);
+                let _ = SetWindowPos(hwnd, None, g.x, g.y, g.w, g.h, SWP_NOACTIVATE | SWP_NOZORDER);
             }
             if let Some(r) = &mut self.renderer {
                 if let Err(e) = r.resize(g.w as u32, g.h as u32) {
@@ -390,7 +429,13 @@ impl Viz {
             self.geometry = Some(g);
             self.dirty = true;
         }
-        unsafe { send_to_bottom(hwnd) };
+        unsafe {
+            // Safety net for the WM_SIZE path in `wndproc`.
+            if IsIconic(hwnd).as_bool() {
+                unminimize(hwnd);
+            }
+            stay_above_desktop(hwnd);
+        }
     }
 
     /// How long to sleep: `None` = until a message arrives (disabled).
@@ -649,8 +694,50 @@ fn create_window(g: Geometry) -> Result<HWND> {
     }
 }
 
-unsafe fn send_to_bottom(hwnd: HWND) {
-    let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+/// Where in the z-order the window belongs: directly above the desktop window. Normally
+/// Progman is the bottom window, so this is the very back; during Show desktop Explorer
+/// lifts Progman over every app window and this keeps the visualizer visible on top of
+/// it. `None`: already there.
+unsafe fn desktop_slot(hwnd: HWND) -> Option<HWND> {
+    let Ok(progman) = FindWindowW(w!("Progman"), PCWSTR::null()) else {
+        return Some(HWND_BOTTOM); // Explorer restarting
+    };
+    match GetWindow(progman, GW_HWNDPREV) {
+        Ok(prev) if prev == hwnd => None,
+        // Inserting after a topmost window would make us topmost: take the top of the
+        // normal band instead, which is right above Progman when nothing else is there.
+        Ok(prev) if GetWindowLongW(prev, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 => Some(HWND_TOP),
+        Ok(prev) => Some(prev),
+        Err(_) => Some(HWND_TOP),
+    }
+}
+
+unsafe fn stay_above_desktop(hwnd: HWND) {
+    if let Some(after) = desktop_slot(hwnd) {
+        let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Windows' "Show desktop" (the taskbar corner, Win+D) can minimise this window along
+/// with the apps, and nothing restores it: put it back, without taking focus.
+unsafe fn unminimize(hwnd: HWND) {
+    log!("visualizer: minimised (Show desktop?), restoring");
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    stay_above_desktop(hwnd);
+}
+
+/// Foreground changed (Show desktop, a window restored, an app switch): follow Progman
+/// for a moment. Runs on the visualizer thread (out-of-context hook).
+unsafe extern "system" fn on_foreground(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    RESTACK_UNTIL.set(Some(Instant::now() + RESTACK_WINDOW));
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -658,14 +745,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_WINDOWPOSCHANGING => {
-            // Whoever moves us in the z-order, we go back to the bottom.
+            // Whoever moves us in the z-order, we go back to just above the desktop.
             let pos = lparam.0 as *mut WINDOWPOS;
             if let Some(pos) = pos.as_mut() {
                 if pos.flags & SWP_NOZORDER == SET_WINDOW_POS_FLAGS(0) {
-                    pos.hwndInsertAfter = HWND_BOTTOM;
+                    match desktop_slot(hwnd) {
+                        Some(after) => pos.hwndInsertAfter = after,
+                        None => pos.flags |= SWP_NOZORDER,
+                    }
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_SIZE if wparam.0 == SIZE_MINIMIZED as usize => {
+            // Restoring from inside the minimise itself does not stick: do it right after.
+            let _ = PostMessageW(Some(hwnd), WM_APP_UNMINIMIZE, WPARAM(0), LPARAM(0));
+            LRESULT(0)
+        }
+        WM_APP_UNMINIMIZE => {
+            if IsIconic(hwnd).as_bool() {
+                unminimize(hwnd);
+            }
+            LRESULT(0)
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
             GEOMETRY_DIRTY.set(true);
