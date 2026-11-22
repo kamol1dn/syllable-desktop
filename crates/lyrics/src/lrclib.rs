@@ -8,19 +8,43 @@ use crate::http::{self, enc, Token};
 use crate::parse::{self, Found};
 
 /// `Ok(None)` is an answer ("they have nothing"); `Err` means LRCLIB could not be reached.
+/// As the Android app: the exact lookup, then one search by title and artist,
+/// scored so a same-titled song by someone else never wins. No title-only search.
 pub fn fetch(agent: &Agent, info: &TrackInfo, token: &Token) -> anyhow::Result<Option<Found>> {
-    let mut last_error: Option<anyhow::Error> = None;
+    let q = matching::query(info);
+    if q.title.is_empty() || q.artist.is_empty() {
+        return Ok(None); // nothing could score as a match without an artist
+    }
     let mut answered = false;
-    let dur = info.duration_ms;
-    for (artist, title) in matching::candidates(&info.title, &info.artist) {
-        token.check()?;
-        match try_candidate(agent, &artist, &title, dur, &mut answered) {
-            Ok(Some(lrc)) => return Ok(parse::from_lrc(&lrc, dur)),
-            Ok(None) => {}
-            Err(e) => {
-                log!("resolve: lrclib error: {e}");
-                last_error = Some(e);
+    let mut last_error: Option<anyhow::Error> = None;
+
+    token.check()?;
+    match http::get(agent, &get_url(&q), &[]) {
+        Ok(res) => {
+            answered = res.ok() || res.status == 404;
+            if res.ok() {
+                if let Some(lrc) = synced(&serde_json::from_str(&res.body).unwrap_or(Value::Null)) {
+                    return Ok(parse::from_lrc(lrc, info.duration_ms));
+                }
             }
+        }
+        Err(e) => {
+            log!("resolve: lrclib error: {e}");
+            last_error = Some(e);
+        }
+    }
+
+    token.check()?;
+    let url = format!("https://lrclib.net/api/search?track_name={}&artist_name={}", enc(&q.title), enc(&q.artist));
+    match http::get(agent, &url, &[]) {
+        Ok(res) if res.ok() => {
+            let doc: Value = serde_json::from_str(&res.body).unwrap_or(Value::Null);
+            return Ok(pick_search_result(&doc, &q).and_then(|lrc| parse::from_lrc(lrc, info.duration_ms)));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log!("resolve: lrclib error: {e}");
+            last_error = Some(e);
         }
     }
     if let (false, Some(e)) = (answered, last_error) {
@@ -29,77 +53,93 @@ pub fn fetch(agent: &Agent, info: &TrackInfo, token: &Token) -> anyhow::Result<O
     Ok(None)
 }
 
-fn try_candidate(agent: &Agent, artist: &str, title: &str, dur: f64, answered: &mut bool) -> anyhow::Result<Option<String>> {
-    if !artist.is_empty() && dur > 1000.0 {
-        let url = format!(
-            "https://lrclib.net/api/get?artist_name={}&track_name={}&duration={}",
-            enc(artist),
-            enc(title),
-            (dur / 1000.0) as i64
-        );
-        let res = http::get(agent, &url, &[])?;
-        if res.ok() || res.status == 404 {
-            *answered = true;
-        }
-        if res.ok() {
-            if let Some(lrc) = synced(&serde_json::from_str(&res.body).unwrap_or(Value::Null)) {
-                return Ok(Some(lrc.to_string()));
-            }
-        }
+/// The exact lookup. LRCLIB matches the duration within 2 s, so an early-ending
+/// Spotify duration is left out (it would find nothing, or a cut-down upload).
+fn get_url(q: &matching::Query) -> String {
+    let mut url = format!("https://lrclib.net/api/get?track_name={}&artist_name={}", enc(&q.title), enc(&q.artist));
+    if !q.album.is_empty() {
+        url.push_str(&format!("&album_name={}", enc(&q.album)));
     }
-
-    let mut url = format!("https://lrclib.net/api/search?track_name={}", enc(title));
-    if !artist.is_empty() {
-        url.push_str(&format!("&artist_name={}", enc(artist)));
+    if let Some(d) = q.strict_duration_ms() {
+        url.push_str(&format!("&duration={}", (d / 1000.0) as i64));
     }
-    let res = http::get(agent, &url, &[])?;
-    if !res.ok() {
-        return Ok(None);
-    }
-    *answered = true;
-    let doc: Value = serde_json::from_str(&res.body).unwrap_or(Value::Null);
-    Ok(pick_search_result(&doc, dur).map(str::to_string))
+    url
 }
 
 fn synced(v: &Value) -> Option<&str> {
-    v.get("syncedLyrics").and_then(Value::as_str).filter(|s| !s.is_empty())
+    v.get("syncedLyrics").and_then(Value::as_str).filter(|s| !s.is_empty() && *s != "null")
 }
 
-/// The synced result closest in duration, if it is within 10 s (or durations are unknown).
-fn pick_search_result(doc: &Value, dur: f64) -> Option<&str> {
-    let results = doc.as_array()?;
-    let duration = |e: &Value| e.get("duration").and_then(Value::as_f64);
-    let best = results
-        .iter()
-        .filter(|e| synced(e).is_some())
-        .min_by(|a, b| {
-            let key = |e: &Value| match duration(e) {
-                Some(d) if dur > 1000.0 => (d * 1000.0 - dur).abs(),
-                _ => f64::MAX,
-            };
-            key(a).total_cmp(&key(b))
-        })?;
-    let bdur = duration(best).map(|d| d * 1000.0).unwrap_or(0.0);
-    (dur < 1000.0 || bdur <= 0.0 || (bdur - dur).abs() < 10_000.0).then(|| synced(best)).flatten()
+/// The best-scoring search result (synced ones get +0.1), as the Android app picks
+/// it; its synced lyrics, if it has any.
+fn pick_search_result<'a>(doc: &'a Value, q: &matching::Query) -> Option<&'a str> {
+    let text = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut best: Option<&Value> = None;
+    let mut best_score = 0.0;
+    for e in doc.as_array()? {
+        let dur = e.get("duration").and_then(Value::as_f64).unwrap_or(0.0) * 1000.0;
+        let score = matching::match_score(q, &text(e, "trackName"), &text(e, "artistName"), dur)
+            + if synced(e).is_some() { 0.1 } else { 0.0 };
+        if score > best_score {
+            best_score = score;
+            best = Some(e);
+        }
+    }
+    best.and_then(synced)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn query(title: &str, artist: &str, secs: f64, spotify: bool) -> matching::Query {
+        matching::query(&TrackInfo {
+            title: title.into(),
+            artist: artist.into(),
+            duration_ms: secs * 1000.0,
+            is_spotify: spotify,
+            source_app: if spotify { "Spotify.exe" } else { "Chrome" }.into(),
+            ..Default::default()
+        })
+    }
+
     #[test]
-    fn search_picks_the_closest_synced_duration() {
+    fn search_picks_the_best_scoring_synced_result() {
         let doc: Value = serde_json::from_str(
-            r#"[{"duration":300,"syncedLyrics":"[00:01.00]far"},
-                {"duration":201,"syncedLyrics":"[00:01.00]near"},
-                {"duration":200,"syncedLyrics":null,"plainLyrics":"plain"}]"#,
+            r#"[{"trackName":"Song","artistName":"Artist","duration":300,"syncedLyrics":"[00:01.00]far"},
+                {"trackName":"Song","artistName":"Artist","duration":201,"syncedLyrics":"[00:01.00]near"},
+                {"trackName":"Song","artistName":"Artist","duration":200,"syncedLyrics":null,"plainLyrics":"plain"}]"#,
         )
         .unwrap();
-        assert_eq!(pick_search_result(&doc, 200_000.0), Some("[00:01.00]near"));
-        // Only a far one: rejected.
-        let far: Value = serde_json::from_str(r#"[{"duration":300,"syncedLyrics":"[00:01.00]far"}]"#).unwrap();
-        assert_eq!(pick_search_result(&far, 200_000.0), None);
-        // Unknown duration: the first synced one is fine.
-        assert_eq!(pick_search_result(&far, 0.0), Some("[00:01.00]far"));
+        assert_eq!(pick_search_result(&doc, &query("Song", "Artist", 200.0, false)), Some("[00:01.00]near"));
+        // Only a far one: another cut, rejected.
+        let far: Value =
+            serde_json::from_str(r#"[{"trackName":"Song","artistName":"Artist","duration":300,"syncedLyrics":"[00:01.00]far"}]"#).unwrap();
+        assert_eq!(pick_search_result(&far, &query("Song", "Artist", 200.0, false)), None);
+        // Unknown duration: fine.
+        assert_eq!(pick_search_result(&far, &query("Song", "Artist", 0.0, false)), Some("[00:01.00]far"));
+    }
+
+    /// LRCLIB's search for "Yamakasi" (no artist) once supplied another artist's
+    /// song; with the artist and the early-ending Spotify duration (233 s for 264 s)
+    /// it is Miyagi's.
+    #[test]
+    fn search_never_takes_another_artists_song() {
+        let doc: Value = serde_json::from_str(
+            r#"[{"trackName":"Yamakasi","artistName":"Sticky M.A./Lusi","duration":146,"syncedLyrics":"[00:01.00]other"},
+                {"trackName":"Yamakasi","artistName":"Miyagi & Andy Panda","duration":383,"syncedLyrics":"[00:01.00]video cut"},
+                {"trackName":"Yamakasi","artistName":"Miyagi & Andy Panda","duration":264,"syncedLyrics":"[00:01.00]right"}]"#,
+        )
+        .unwrap();
+        let q = query("Yamakasi", "Miyagi & Andy Panda", 233.0, true);
+        assert_eq!(pick_search_result(&doc, &q), Some("[00:01.00]right"));
+        assert_eq!(pick_search_result(&doc, &query("Yamakasi", "Someone Else", 233.0, true)), None);
+    }
+
+    #[test]
+    fn exact_lookup_leaves_out_an_early_ending_duration() {
+        let q = query("Phoenix", "League of Legends", 184.0, true);
+        assert_eq!(get_url(&q), "https://lrclib.net/api/get?track_name=Phoenix&artist_name=League%20of%20Legends");
+        assert!(get_url(&query("Phoenix", "League of Legends", 198.0, false)).ends_with("&duration=198"));
     }
 }

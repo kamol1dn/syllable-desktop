@@ -77,27 +77,36 @@ pub fn lyrics_for(agent: &Agent, key: &str, track_id: &str, token: &Token) -> an
     Ok(parse::from_spicy(&serde_json::from_str(&body)?, SPICY_API))
 }
 
+/// The search request for a track: one query, as the Android app sends it. There
+/// is no title-only retry: a title alone matches whichever song of that name the
+/// API ranks first ("Phoenix" by Stray Kids for League of Legends' "Phoenix").
+fn search_url(q: &matching::Query) -> String {
+    let mut url = format!("{BASE}/v1/tracks/search?limit=3&title={}", enc(&q.title));
+    if !q.artist.is_empty() {
+        url.push_str(&format!("&artist={}", enc(&q.artist)));
+    }
+    if !q.album.is_empty() {
+        url.push_str(&format!("&album={}", enc(&q.album)));
+    }
+    // The API demotes a duration mismatch to "version", so an early-ending Spotify
+    // duration would hide the right song: leave it out, as for an unknown one.
+    if let Some(d) = q.strict_duration_ms() {
+        url.push_str(&format!("&duration={:.3}", d / 1000.0));
+    }
+    url
+}
+
 /// Ids of confident matches ("exact" or "likely"), best first.
 pub fn search(agent: &Agent, key: &str, info: &TrackInfo, token: &Token) -> anyhow::Result<Vec<String>> {
-    let mut ids: Vec<String> = Vec::new();
-    for (artist, title) in matching::candidates(&info.title, &info.artist).into_iter().take(2) {
-        token.check()?;
-        let mut url = format!("{BASE}/v1/tracks/search?limit=3&title={}", enc(&title));
-        if !artist.is_empty() {
-            url.push_str(&format!("&artist={}", enc(&artist)));
-        }
-        if !info.album.trim().is_empty() {
-            url.push_str(&format!("&album={}", enc(&info.album)));
-        }
-        if info.duration_ms > 1000.0 {
-            url.push_str(&format!("&duration={:.3}", info.duration_ms / 1000.0));
-        }
-        let Some(body) = get(agent, key, &url, token)? else { continue };
-        ids.extend(confident_ids(&serde_json::from_str(&body)?).into_iter().filter(|id| !ids.contains(id)).collect::<Vec<_>>());
-        if !ids.is_empty() {
-            break;
-        }
+    let q = matching::query(info);
+    if q.title.is_empty() {
+        return Ok(Vec::new());
     }
+    token.check()?;
+    let ids = match get(agent, key, &search_url(&q), token)? {
+        Some(body) => confident_ids(&serde_json::from_str(&body)?),
+        None => Vec::new(),
+    };
     if ids.is_empty() {
         log!("spicy-api: search found no confident match for \"{} - {}\"", info.artist, info.title);
     }
@@ -212,5 +221,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(confident_ids(&doc), ["a", "c"]);
+    }
+
+    fn spotify_track(title: &str, artist: &str, secs: f64) -> TrackInfo {
+        TrackInfo {
+            title: title.into(),
+            artist: artist.into(),
+            album: "YAMAKASI".into(),
+            duration_ms: secs * 1000.0,
+            is_spotify: true,
+            source_app: "Spotify.exe".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn search_sends_the_artist_and_no_early_ending_duration() {
+        let q = matching::query(&spotify_track("Yamakasi", "Miyagi & Andy Panda", 233.0));
+        assert_eq!(search_url(&q), format!("{BASE}/v1/tracks/search?limit=3&title=Yamakasi&artist=Miyagi%20%26%20Andy%20Panda&album=YAMAKASI"));
+        let browser = TrackInfo { source_app: "Chrome".into(), is_spotify: false, ..spotify_track("Song", "Artist", 200.0) };
+        assert!(search_url(&matching::query(&browser)).ends_with("&duration=200.000"));
     }
 }

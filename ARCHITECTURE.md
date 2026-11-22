@@ -53,8 +53,11 @@ Rules:
 - `ConfigStore::{read, snapshot, update}`: `update` saves and publishes `ConfigChanged`.
   The file is `%LOCALAPPDATA%\Syllable\config.json`, PascalCase keys.
 - `log!("…")` appends to `%LOCALAPPDATA%\Syllable\log.txt`.
-- `matching`: title/artist cleanup and scoring (`candidates`, `norm`, `pick_best`,
-  `TrackCandidate`), shared by media and lyrics.
+- `matching`: title/artist cleanup and scoring, shared by media and lyrics. The
+  lyrics providers use the Android app's rules (`query`, `match_score`): one
+  cleaned (title, artist) query per song, results that are clearly another song
+  scored -1, no title-only fallback, and Spotify desktop's duration treated as
+  possibly up to 40 s early. The prototype's `candidates`/`pick_best` remain.
 - `accounts`: the lyric sources the user can set up; see "Accounts" below.
 
 Changing core: additions only (a new `Event` variant, a new config field with a

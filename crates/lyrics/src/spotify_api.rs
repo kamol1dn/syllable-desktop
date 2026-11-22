@@ -143,21 +143,6 @@ pub fn queue(acc: &Accounts, max: usize, token: &Token) -> anyhow::Result<Vec<Qu
     Ok(list)
 }
 
-/// "A, B & C" -> "A".
-pub fn primary_artist(artist: &str) -> String {
-    let lower = artist.to_lowercase();
-    // Separators as in the prototype: , & ; / " x " " and " " feat. " " ft. "
-    let seps = [",", "&", ";", "/", " x ", " and ", " feat. ", " feat ", " ft. ", " ft "];
-    let cut = seps.iter().filter_map(|s| lower.find(s)).min();
-    let first = match cut {
-        // `to_lowercase` can change byte lengths; only cut when the index is safe in the original.
-        Some(i) if artist.is_char_boundary(i) && lower.len() == artist.len() => &artist[..i],
-        _ => artist,
-    };
-    let first = first.trim();
-    if first.is_empty() { artist.trim().to_string() } else { first.to_string() }
-}
-
 /// Exact Spotify id for the playing song. With Spotify itself as the player, its
 /// own currently-playing answer wins when the title agrees; otherwise the catalog
 /// is searched by title, artist and duration.
@@ -171,7 +156,6 @@ pub fn find_track_id(acc: &Accounts, info: &TrackInfo, token: &Token) -> anyhow:
         Ok(Some(id.to_string()))
     };
 
-    let cands = matching::candidates(&info.title, &info.artist);
     if info.is_spotify {
         if let Some(now) = currently_playing(acc, token)? {
             let n_name = matching::norm(&now.name);
@@ -184,14 +168,16 @@ pub fn find_track_id(acc: &Accounts, info: &TrackInfo, token: &Token) -> anyhow:
         }
     }
 
-    for (artist, title) in cands.iter().take(2) {
-        let q = if artist.is_empty() { title.clone() } else { format!("track:{title} artist:{}", primary_artist(artist)) };
-        let mut results = search(acc, &q, token)?;
-        if results.is_empty() && !artist.is_empty() {
-            results = search(acc, &format!("{title} {artist}"), token)?;
-        }
-        let (best, score) = matching::pick_best(&results, &cands, info.duration_ms);
-        if let Some(best) = best {
+    // One search, scored as the Android app does.
+    let q = matching::query(info);
+    if !q.title.is_empty() {
+        let search_q = if q.artist.is_empty() {
+            q.title.clone()
+        } else {
+            format!("track:{} artist:{}", q.title, matching::primary_artist(&q.artist))
+        };
+        let results = search(acc, &search_q, token)?;
+        if let Some((best, score)) = best_match(&results, &q) {
             log!(
                 "spotify: matched \"{} - {}\" (score {score:.2})",
                 best.artists.first().map(String::as_str).unwrap_or(""),
@@ -202,6 +188,18 @@ pub fn find_track_id(acc: &Accounts, info: &TrackInfo, token: &Token) -> anyhow:
     }
     log!("spotify: no confident match for \"{} - {}\"", info.artist, info.title);
     Ok(None)
+}
+
+/// The best-scoring result, unless every one is clearly another song.
+fn best_match<'a>(results: &'a [TrackCandidate], q: &matching::Query) -> Option<(&'a TrackCandidate, f64)> {
+    results
+        .iter()
+        .map(|t| (t, matching::match_score(q, &t.name, &t.artists.join(", "), t.duration_ms)))
+        .filter(|(_, s)| *s > 0.0)
+        .fold(None, |best: Option<(&TrackCandidate, f64)>, (t, s)| match best {
+            Some((_, bs)) if bs >= s => best,
+            _ => Some((t, s)),
+        })
 }
 
 /// Spotify's own lyrics for a track id. Needs the web player sign-in.
@@ -227,6 +225,7 @@ pub fn user_name(acc: &Accounts, token: &Token) -> anyhow::Result<Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matching::primary_artist;
 
     #[test]
     fn primary_artist_takes_the_first_name() {
@@ -235,6 +234,32 @@ mod tests {
         assert_eq!(primary_artist("Simon and Garfunkel"), "Simon");
         assert_eq!(primary_artist("Solo"), "Solo");
         assert_eq!(primary_artist("Beyoncé & JAY-Z"), "Beyoncé");
+    }
+
+    #[test]
+    fn best_match_skips_same_titled_songs_by_others() {
+        let t = |id: &str, name: &str, artists: &[&str], secs: f64| TrackCandidate {
+            id: id.into(),
+            name: name.into(),
+            artists: artists.iter().map(|s| s.to_string()).collect(),
+            duration_ms: secs * 1000.0,
+        };
+        let info = TrackInfo {
+            title: "Phoenix".into(),
+            artist: "League of Legends".into(),
+            duration_ms: 184_000.0,
+            is_spotify: true,
+            source_app: "Spotify.exe".into(),
+            ..Default::default()
+        };
+        let q = matching::query(&info);
+        let results = [
+            t("3yLOy7bjC1dDeOh4MArkq8", "Phoenix", &["Stray Kids"], 182.013),
+            t("68dbDYr1axaxScBlWp8dI1", "Phoenix - Blanke Remix", &["League of Legends", "Cailin Russo", "Chrissy Costanza", "Blanke"], 208.571),
+            t("1jsRo6lODprC33SNqTvLGz", "Phoenix", &["League of Legends", "Cailin Russo", "Chrissy Costanza"], 197.633),
+        ];
+        assert_eq!(best_match(&results, &q).map(|(b, _)| b.id.as_str()), Some("1jsRo6lODprC33SNqTvLGz"));
+        assert!(best_match(&results[..1], &q).is_none());
     }
 
     #[test]
