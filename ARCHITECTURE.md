@@ -112,10 +112,15 @@ drives them through core alone, with no crate dependency.
   WebView2 profile, `%LOCALAPPDATA%\Syllable\spotify-webview`. Lyrics are cached in
   `%LOCALAPPDATA%\Syllable\cache\`.
 - **Resolve order.** Lyrics re-resolves the current song whenever what is set up
-  changes. The order is:
-  1. the cache
-  2. `spicy-api` (with a key)
-  3. `spotify` (signed in)
-  4. `lrclib` (always)
+  changes. After the cache, every provider is asked at once (the Android app's
+  `LyricsRepository`), in this priority order:
+  1. `spicy-api` (with a key)
+  2. `spotify` (signed in; the track id comes from Spotify, or from Spicy's search
+     when api.spotify.com is rate-limited)
+  3. `musixmatch` (always; richsync word timing)
+  4. `netease` (always; YRC word timing)
+  5. `lrclib` (always)
 
+  Word timing beats line timing; within the same kind the earlier provider wins.
+  The answer is final once no provider still running could beat it.
   `Lyrics::source` names the provider that answered.

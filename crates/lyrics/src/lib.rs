@@ -1,5 +1,5 @@
 //! Lyrics: resolves the playing track to synced lyrics (Spicy Lyrics API key,
-//! Spotify, LRCLIB) with a disk cache, and owns the optional accounts.
+//! Spotify, Musixmatch, NetEase, LRCLIB) with a disk cache, and owns the optional accounts.
 //!
 //! In: `TrackChanged`, `TrackUpdated`, `AccountsCommand`, `Quit`.
 //! Out: `Lyrics` (every `TrackChanged` ends in exactly one terminal publish, maybe
@@ -9,6 +9,8 @@ mod accounts;
 pub mod cache;
 mod http;
 mod lrclib;
+mod musixmatch;
+mod netease;
 pub mod parse;
 mod resolver;
 mod secrets;

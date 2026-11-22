@@ -242,29 +242,104 @@ fn read_syllables(holder: &Value) -> (String, Vec<Seg>) {
     (text.trim_end().to_string(), segs)
 }
 
-// ---- LRC (LRCLIB) ----
+// ---- Word-timed lines (Musixmatch richsync, NetEase YRC, word-tagged LRC) ----
 
-/// An LRC string into line-synced lyrics.
+/// One timed word (or a piece of one). `text` keeps a trailing space when the
+/// word ends there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Word {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+}
+
+/// Lines of timed words (line start, line end, words) into word-synced lyrics.
+pub fn from_words(lines: Vec<(f64, f64, Vec<Word>)>, source: &str) -> Option<Found> {
+    let mut f = Found::new(Kind::Syllable, source);
+    for (start, end, words) in lines {
+        let words: Vec<Word> = words.into_iter().filter(|w| !w.text.trim().is_empty()).collect();
+        let n = words.len();
+        let segs: Vec<Seg> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let text = SPACES_RUN.replace_all(w.text.trim_start(), " ").into_owned();
+                let next_cjk = words.get(i + 1).and_then(|x| x.text.trim_start().chars().next()).is_some_and(is_cjk);
+                let ends_word = i + 1 == n || text.ends_with(' ') || text.chars().last().is_some_and(is_cjk) || next_cjk;
+                Seg { start: w.start, end: w.end.max(w.start + 40.0), text, part_of_word: !ends_word }
+            })
+            .collect();
+        let (Some(first), Some(last)) = (segs.first(), segs.last()) else { continue };
+        let text = segs.iter().map(|x| x.text.as_str()).collect::<String>().trim().to_string();
+        let (line_start, line_end) = (start.min(first.start), end.max(last.end));
+        f.lyrics.lines.push(LyricLine { text, start: line_start, end: line_end, sylls: Some(segs), opposite: false });
+    }
+    if f.lyrics.lines.is_empty() {
+        return None;
+    }
+    f.lyrics.lines.sort_by(|a, b| a.start.total_cmp(&b.start));
+    fill_line_ends(&mut f.lyrics.lines);
+    f.lyrics.start_time = f.lyrics.lines[0].start;
+    Some(f)
+}
+
+static SPACES_RUN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\s+").unwrap());
+
+// ---- LRC (LRCLIB, Musixmatch subtitles, NetEase) ----
+
+/// An LRC string from LRCLIB.
 pub fn from_lrc(lrc: &str, duration_ms: f64) -> Option<Found> {
+    from_lrc_as(lrc, duration_ms, "lrclib")
+}
+
+/// An LRC string into synced lyrics: line timing, or word timing when the file
+/// carries "enhanced" `<mm:ss.xx>` word tags (as the Android app's `LrcParser`).
+pub fn from_lrc_as(lrc: &str, duration_ms: f64, source: &str) -> Option<Found> {
     let mut entries: Vec<(f64, String)> = Vec::new();
-    for raw in lrc.split('\n') {
-        let line = raw.trim_end_matches('\r');
+    for raw in lrc.lines() {
+        let line = raw.trim_end_matches(char::is_whitespace);
         let (stamps, text) = lrc_stamps(line);
         for ms in stamps {
             entries.push((ms, text.trim().to_string()));
         }
     }
     entries.sort_by(|a, b| a.0.total_cmp(&b.0)); // stable: same stamps keep file order
-    let mut f = Found::new(Kind::Line, "lrclib");
+    let line_end = |i: usize, start: f64| match entries.get(i + 1) {
+        Some((next, _)) => *next,
+        None if duration_ms > start => duration_ms,
+        None => start + 6000.0,
+    };
+
+    if entries.iter().any(|(_, t)| !word_tags(t).is_empty()) {
+        let mut lines = Vec::new();
+        for (i, (start, text)) in entries.iter().enumerate() {
+            let next = line_end(i, *start);
+            let words = if word_tags(text).is_empty() {
+                let t = text.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                vec![Word { text: t.to_string(), start: *start, end: next }]
+            } else {
+                word_tagged(text, *start, next)
+            };
+            if !words.is_empty() {
+                lines.push((*start, *start, words));
+            }
+        }
+        return from_words(lines, source);
+    }
+
+    let mut f = Found::new(Kind::Line, source);
     for (i, (start, text)) in entries.iter().enumerate() {
         if blank(text) {
             continue; // empty stamps mark gaps
         }
-        let end = match entries.get(i + 1) {
-            Some((next, _)) => *next,
-            None if duration_ms > *start => duration_ms,
-            None => start + 6000.0,
-        };
+        let end = line_end(i, *start);
         f.lyrics.lines.push(LyricLine { text: text.clone(), start: *start, end, sylls: None, opposite: false });
     }
     if f.lyrics.lines.is_empty() {
@@ -272,6 +347,49 @@ pub fn from_lrc(lrc: &str, duration_ms: f64) -> Option<Found> {
     }
     f.lyrics.start_time = f.lyrics.lines[0].start;
     Some(f)
+}
+
+/// `<mm:ss.xx>` tags in a line body: (ms, byte start, byte end).
+fn word_tags(body: &str) -> Vec<(f64, usize, usize)> {
+    let b = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'<' {
+            if let Some((ms, len)) = parse_tag(&b[i..], b'>') {
+                out.push((ms, i, i + len));
+                i += len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Words of a word-tagged line: each tag starts the text after it; a tag with no
+/// text after it ends the previous word.
+fn word_tagged(body: &str, line_start: f64, next_line: f64) -> Vec<Word> {
+    let tags = word_tags(body);
+    let mut out: Vec<Word> = Vec::new();
+    let lead = &body[..tags[0].1];
+    if !lead.trim().is_empty() {
+        out.push(Word { text: lead.to_string(), start: line_start, end: line_start });
+    }
+    for (i, &(t, _, after)) in tags.iter().enumerate() {
+        let text_end = tags.get(i + 1).map(|x| x.1).unwrap_or(body.len());
+        let text = &body[after..text_end];
+        if let Some(prev) = out.last_mut().filter(|p| p.end <= p.start) {
+            prev.end = t;
+        }
+        if !text.is_empty() {
+            out.push(Word { text: text.to_string(), start: t, end: t });
+        }
+    }
+    if let Some(last) = out.last_mut().filter(|l| l.end <= l.start) {
+        last.end = next_line.min(last.start + 1000.0 + last.text.chars().count() as f64 * 40.0);
+    }
+    out
 }
 
 /// Every `[mm:ss(.xx)]` stamp anywhere on the line, and the text after the last one.
@@ -298,6 +416,11 @@ fn lrc_stamps(line: &str) -> (Vec<f64>, &str) {
 
 /// `[12:34]`, `[12:34.56]`, `[12:34:567]` at the start of `b`: (ms, bytes consumed).
 fn parse_stamp(b: &[u8]) -> Option<(f64, usize)> {
+    parse_tag(b, b']')
+}
+
+/// A time tag at the start of `b` that closes with `close` (`]` or `>`).
+fn parse_tag(b: &[u8], close: u8) -> Option<(f64, usize)> {
     fn digits(b: &[u8], from: usize) -> (usize, usize) {
         let mut end = from;
         while end < b.len() && b[end].is_ascii_digit() {
@@ -331,7 +454,7 @@ fn parse_stamp(b: &[u8]) -> Option<(f64, usize)> {
         }
         // "[01:02.]" falls through to the bracket check below, as the regex does not match it.
     }
-    (b.get(end) == Some(&b']')).then_some((ms, end + 1))
+    (b.get(end) == Some(&close)).then_some((ms, end + 1))
 }
 
 // ---- Spotify (spclient color-lyrics v2) ----
@@ -675,6 +798,25 @@ mod tests {
         assert!(from_lrc("[00:01.00]\nplain", 0.0).is_none());
         // Last line with no known duration: +6 s.
         close(from_lrc("[00:02.00]Only", 0.0).unwrap().lyrics.lines[0].end, 8000.0);
+    }
+
+    /// "Enhanced" LRC (as the Android app's LrcParser): word tags give word timing.
+    #[test]
+    fn lrc_word_tags_give_word_timing() {
+        let f = from_lrc_as("[00:01.00]<00:01.00>Hello <00:01.50>world<00:02.00>\n[00:03.00]Untagged line", 0.0, "musixmatch").unwrap();
+        assert_eq!(f.kind, Kind::Syllable);
+        assert_eq!(f.source(), "musixmatch");
+        let first = &f.lyrics.lines[0];
+        assert_eq!(first.text, "Hello world");
+        let segs = first.sylls.as_ref().unwrap();
+        assert_eq!(
+            segs.iter().map(|s| (s.text.as_str(), s.start, s.end)).collect::<Vec<_>>(),
+            [("Hello ", 1000.0, 1500.0), ("world", 1500.0, 2000.0)]
+        );
+        // A line without tags is lit as a whole.
+        let second = &f.lyrics.lines[1];
+        assert_eq!((second.text.as_str(), second.start, second.end), ("Untagged line", 3000.0, 9000.0));
+        assert_eq!(second.sylls.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

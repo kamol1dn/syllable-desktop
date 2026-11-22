@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+regex = { version = "1.13.2", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"

@@ -3,6 +3,9 @@
 //! token (the user's own app is preferred: its own rate limit); the lyrics endpoint
 //! (spclient) only takes the web player's.
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 use syllable_core::matching::{self, TrackCandidate};
 use syllable_core::{log, TrackInfo};
@@ -41,9 +44,21 @@ fn host(url: &str) -> &str {
     url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url)
 }
 
+/// api.spotify.com said 429: no calls to it before this. Calling while limited
+/// only keeps the limit going (every call from 08:35 on was refused).
+static API_BLOCKED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn api_blocked() -> bool {
+    API_BLOCKED_UNTIL.lock().unwrap().is_some_and(|t| Instant::now() < t)
+}
+
 /// GET returning the body; `None` for 204/404, rate limits, other errors, or no token.
 /// One retry with a fresh token on 401.
 fn get(acc: &Accounts, url: &str, kind: Auth, token: &Token) -> anyhow::Result<Option<String>> {
+    let api = host(url) == "api.spotify.com";
+    if api && api_blocked() {
+        return Ok(None);
+    }
     for attempt in 0..2 {
         token.check()?;
         let Some((tok, is_app)) = token_for(acc, kind) else { return Ok(None) };
@@ -65,7 +80,11 @@ fn get(acc: &Accounts, url: &str, kind: Auth, token: &Token) -> anyhow::Result<O
             }
             204 | 404 => return Ok(None),
             429 => {
-                log!("spotify: rate limited on {} (retry-after {}s)", host(url), res.retry_after.as_deref().unwrap_or("?"));
+                let wait = res.retry_after.as_deref().and_then(|r| r.trim().parse::<u64>().ok()).unwrap_or(30).clamp(1, 3600);
+                if api {
+                    *API_BLOCKED_UNTIL.lock().unwrap() = Some(Instant::now() + Duration::from_secs(wait));
+                }
+                log!("spotify: rate limited on {} (retry-after {wait}s); not calling it until then", host(url));
                 return Ok(None);
             }
             s if !(200..300).contains(&s) => {

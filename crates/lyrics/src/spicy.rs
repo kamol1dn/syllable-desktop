@@ -129,12 +129,13 @@ fn confident_ids(doc: &Value) -> Vec<String> {
 /// Lyrics for the track: the player's own Spotify id first (exact), then the id a
 /// Spotify lookup gives, then Spicy's own search. Unsynced results are only
 /// returned when nothing synced turned up.
+/// `search_ids` is `search` for this track, shared with the Spotify provider.
 pub fn fetch(
     agent: &Agent,
     key: &str,
-    info: &TrackInfo,
     known_id: Option<&str>,
-    spotify_lookup: Option<&mut dyn FnMut() -> anyhow::Result<Option<String>>>,
+    spotify_lookup: Option<&dyn Fn() -> anyhow::Result<Option<String>>>,
+    search_ids: &dyn Fn() -> anyhow::Result<Vec<String>>,
     token: &Token,
 ) -> anyhow::Result<Option<Found>> {
     let mut tried = HashSet::new();
@@ -173,7 +174,7 @@ pub fn fetch(
             return Ok(Some(f));
         }
     }
-    for id in search(agent, key, info, token)? {
+    for id in search_ids()? {
         if let Some(f) = attempt(Some(&id), "search match", &mut fallback)? {
             return Ok(Some(f));
         }

@@ -14,13 +14,20 @@ use crate::parse::Found;
 
 pub const SPICY_API: &str = "spicy-api";
 pub const SPOTIFY: &str = "spotify";
+pub const MUSIXMATCH: &str = "musixmatch";
+pub const NETEASE: &str = "netease";
 pub const LRCLIB: &str = "lrclib";
 /// The prototype's spicetify bridge. No longer a provider, but old cache entries
 /// may name it and it serves the same data as the Spicy API.
 pub const BRIDGE: &str = "spicy";
 
-/// Earlier wins ties.
-const PRIORITY: [&str; 4] = [BRIDGE, SPICY_API, SPOTIFY, LRCLIB];
+/// Earlier wins ties (the Android app's order).
+const PRIORITY: [&str; 6] = [BRIDGE, SPICY_API, SPOTIFY, MUSIXMATCH, NETEASE, LRCLIB];
+
+/// Position in the priority order; lower is preferred.
+pub fn priority(source: &str) -> usize {
+    PRIORITY.iter().position(|x| *x == source).unwrap_or(PRIORITY.len())
+}
 
 /// A "nothing found" is asked again after this long (songs get synced over time).
 pub const NEGATIVE_MAX_AGE_SECS: f64 = 3.0 * 86_400.0;
@@ -53,10 +60,7 @@ pub fn beats(candidate: Option<&Found>, current: Option<&Found>) -> bool {
     match current {
         None => true,
         Some(cur) if c.rank() != cur.rank() => c.rank() > cur.rank(),
-        Some(cur) => {
-            let p = |s: &str| PRIORITY.iter().position(|x| *x == s).unwrap_or(PRIORITY.len());
-            p(c.source()) < p(cur.source())
-        }
+        Some(cur) => priority(c.source()) < priority(cur.source()),
     }
 }
 

@@ -1,6 +1,6 @@
 //! Blocking HTTP (ureq) and cancellation for the worker threads.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -116,12 +116,14 @@ pub struct Token {
     counter: Arc<AtomicU64>,
     gen: u64,
     deadline: Option<Instant>,
+    /// Set by whoever no longer needs the work (a resolve that has its answer).
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Token {
     /// A token that is never cancelled (tests, one-off commands).
     pub fn none() -> Self {
-        Self { counter: Arc::new(AtomicU64::new(0)), gen: 0, deadline: None }
+        Self { counter: Arc::new(AtomicU64::new(0)), gen: 0, deadline: None, stop: None }
     }
 
     pub fn with_deadline(mut self, after: Duration) -> Self {
@@ -129,8 +131,15 @@ impl Token {
         self
     }
 
+    /// This token, also cancelled once `stop` is set.
+    pub fn with_stop(&self, stop: Arc<AtomicBool>) -> Self {
+        Self { stop: Some(stop), ..self.clone() }
+    }
+
     pub fn cancelled(&self) -> bool {
-        self.counter.load(Ordering::SeqCst) != self.gen || self.deadline.is_some_and(|d| Instant::now() >= d)
+        self.counter.load(Ordering::SeqCst) != self.gen
+            || self.deadline.is_some_and(|d| Instant::now() >= d)
+            || self.stop.as_ref().is_some_and(|s| s.load(Ordering::SeqCst))
     }
 
     pub fn check(&self) -> anyhow::Result<()> {
@@ -164,7 +173,7 @@ pub struct Generation {
 impl Generation {
     pub fn next(&self) -> Token {
         let gen = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
-        Token { counter: self.counter.clone(), gen, deadline: None }
+        Token { counter: self.counter.clone(), gen, deadline: None, stop: None }
     }
 
     pub fn cancel(&self) {
