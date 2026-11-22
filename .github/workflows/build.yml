@@ -1,0 +1,97 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Release build (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --release --locked
+
+      - name: Test
+        run: cargo test --workspace --release --locked
+
+      - name: Name this build
+        id: name
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF.StartsWith('refs/tags/')) {
+            $env:GITHUB_REF_NAME
+          } else {
+            "main-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $stage = 'dist/Syllable'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          # What the app needs side by side: the exe, and the wallpaper page the
+          # desktop host loads from assets/wallpaper. The settings page is embedded.
+          Copy-Item target/release/syllable.exe -Destination $stage
+          Copy-Item target/release/assets -Destination $stage -Recurse
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/syllable-${{ steps.name.outputs.version }}-windows-x64.zip" -Force
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: syllable-${{ steps.name.outputs.version }}-windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Upload debug symbols
+        # The release profile strips the exe and writes line tables to the .pdb. Keep the
+        # .pdb of every released build or its crash dumps cannot be read.
+        uses: actions/upload-artifact@v4
+        with:
+          name: syllable-${{ steps.name.outputs.version }}-pdb
+          path: target/release/syllable.pdb
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the build
+        uses: actions/download-artifact@v4
+        with:
+          pattern: syllable-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/syllable.pdb
+          generate_release_notes: true
+          fail_on_unmatched_files: true
