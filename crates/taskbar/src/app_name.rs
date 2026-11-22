@@ -281,7 +281,7 @@ impl AppNameStrip {
 
     pub fn frame(&mut self, f: &Factories, cfg: &Config, tray: Option<HWND>, screen: &Screen, relayout: bool) {
         let now = Instant::now();
-        let dt = ((now - self.last_frame).as_secs_f32() * 1000.0).min(100.0);
+        let dt = crate::timeline::frame_dt_ms((now - self.last_frame).as_secs_f32() * 1000.0);
         self.last_frame = now;
         let before = self.opacity;
         self.opacity = crate::timeline::approach(self.opacity, if self.wanted { 1.0 } else { 0.0 }, dt, 180.0);

@@ -1,8 +1,9 @@
 //! The lyrics strip: the current line with a soft-edged karaoke sweep, background
 //! vocals as a smaller second row, interlude dots, and lines that rise into place.
 //!
-//! Motion (our own, not the prototype's curves):
-//! - The sweep is a gradient edge about one em wide that eases through each syllable.
+//! Motion:
+//! - The sweep is a gradient edge about one em wide that moves linearly through each
+//!   syllable (as the prototype does), so runs of syllables flow without stalling.
 //! - A new line rises in from below and fades up (ease-out cubic, 320 ms) while the
 //!   outgoing one keeps rising and fades away, so the strip reads like a scroll.
 //! - A background vocal lifts the main line up and slides in under it.
@@ -53,6 +54,7 @@ struct LineVis {
     layout: TextLayout,
     spans: Option<Vec<SegSpan>>,
     start: f64,
+    end: f64,
     /// The line rasterised once as an alpha mask; each frame only fills it with the
     /// sweep gradient (much cheaper than laying glyphs out again every frame).
     mask: std::cell::RefCell<Option<ID2D1Bitmap>>,
@@ -91,6 +93,15 @@ struct Row {
     key: Key,
     line: Option<LineVis>,
     since: Instant,
+    /// How far (0..1, eased) the row was lifted for a background vocal when it was
+    /// retired: an outgoing line keeps that height instead of snapping back to centre.
+    lift: f32,
+}
+
+impl Row {
+    fn new(key: Key, now: Instant) -> Self {
+        Row { key, line: None, since: now, lift: 0.0 }
+    }
 }
 
 struct Res {
@@ -138,7 +149,7 @@ impl LyricStrip {
             bg_fmt: None,
             fmt_scale: 0.0,
             lyrics: None,
-            cur: Row { key: Key::Empty, line: None, since: now },
+            cur: Row::new(Key::Empty, now),
             prev: None,
             bg: None,
             bg_anim: 0.0,
@@ -165,7 +176,19 @@ impl LyricStrip {
     }
 
     pub fn set_lyrics(&mut self, lyrics: Option<Arc<Lyrics>>) {
-        self.lyrics = lyrics.filter(|l| !l.is_empty());
+        let lyrics = lyrics.filter(|l| !l.is_empty());
+        // The same lyrics again (a re-resolve, another provider with identical timing):
+        // keep the line on screen instead of replaying its entrance.
+        let same = match (&self.lyrics, &lyrics) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || (a.lines == b.lines && a.bg == b.bg),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            self.lyrics = lyrics;
+            return;
+        }
+        self.lyrics = lyrics;
         // Layouts index into the old lyrics: drop them, and let the old line leave.
         self.retire_current();
         self.bg = None;
@@ -196,11 +219,16 @@ impl LyricStrip {
 
     fn retire_current(&mut self) {
         let now = Instant::now();
-        let old = std::mem::replace(&mut self.cur, Row { key: Key::Empty, line: None, since: now });
-        self.prev = (old.key != Key::Empty).then_some(old).map(|mut r| {
-            r.since = now;
-            r
-        });
+        let lift = timeline::smoothstep(self.bg_anim);
+        let mut old = std::mem::replace(&mut self.cur, Row::new(Key::Empty, now));
+        // An empty row has nothing to animate out: keep whatever is still leaving
+        // (after a track change the old line is retired first, then the empty row).
+        if old.key == Key::Empty {
+            return;
+        }
+        old.since = now;
+        old.lift = lift;
+        self.prev = Some(old);
     }
 
     /// Whether frames will keep changing without an event (drives the frame clock).
@@ -246,9 +274,8 @@ impl LyricStrip {
     /// Place, update and (if anything visible changed) draw one frame.
     pub fn frame(&mut self, f: &Factories, cfg: &Config, tray: Option<HWND>, screen: &Screen, t_ms: Option<f64>, relayout: bool) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32() * 1000.0;
+        let dt = timeline::frame_dt_ms((now - self.last_frame).as_secs_f32() * 1000.0);
         self.last_frame = now;
-        let dt = dt.min(100.0);
 
         self.opacity = timeline::approach(self.opacity, if self.wanted { 1.0 } else { 0.0 }, dt, FADE);
         if self.opacity <= 0.0 && !self.wanted {
@@ -298,7 +325,7 @@ impl LyricStrip {
 
         if key != self.cur.key {
             self.retire_current();
-            self.cur = Row { key, line: None, since: now };
+            self.cur = Row::new(key, now);
         }
         if let Some(p) = &self.prev {
             if p.since.elapsed().as_secs_f32() * 1000.0 >= LINE_IN {
@@ -330,8 +357,8 @@ impl LyricStrip {
         let main_sweep = self.cur.line.as_ref().map(|l| sweep_head(l, t, s, cfg.main_font_px as f32)).unwrap_or(0.0);
         let bg_sweep = self.bg.as_ref().map(|(_, l)| sweep_head(l, t, s, cfg.bg_font_px as f32)).unwrap_or(0.0);
         let dots = if let Key::Dots { start, end } = self.cur.key { dots_state(start, end, t) } else { [0.0; 4] };
-        let main_scrolls = self.cur.line.as_ref().is_some_and(|l| l.layout.width > avail);
-        let bg_scrolls = self.bg.as_ref().is_some_and(|(_, l)| l.layout.width > avail * 0.9);
+        let main_scroll = self.cur.line.as_ref().filter(|l| l.layout.width > avail).map(|l| scroll_point(l, t, s, cfg.main_font_px as f32));
+        let bg_scroll = self.bg.as_ref().filter(|(_, l)| l.layout.width > avail).map(|(_, l)| scroll_point(l, t, s, cfg.bg_font_px as f32));
         // Everything but the sweep heads: when only those moved, just the column around
         // them is redrawn and handed to DWM.
         let mut hs = DefaultHasher::new();
@@ -343,8 +370,8 @@ impl LyricStrip {
             q(self.bg_anim, 64.0),
             dots.map(|d| q(d, 64.0)),
             q(self.opacity, 64.0),
-            main_scrolls.then(|| q(main_sweep, 1.0)),
-            bg_scrolls.then(|| q(bg_sweep, 1.0)),
+            main_scroll.map(|x| q(x, 1.0)),
+            bg_scroll.map(|x| q(x, 1.0)),
         )
             .hash(&mut hs);
         let layout_sig = hs.finish();
@@ -402,6 +429,8 @@ impl LyricStrip {
             ctx.row(p, -rise * 0.55 * e, (1.0 - e).powi(2), false);
         }
         let main_drawn = {
+            // Only the current row's position may drive the next sweep-only repaint.
+            ctx.drawn.set(None);
             let e = timeline::ease_out_cubic(cur_p);
             ctx.row(&self.cur, rise * 0.5 * (1.0 - e), e, true);
             ctx.drawn.take()
@@ -409,8 +438,11 @@ impl LyricStrip {
         let mut bg_drawn = None;
         if let Some((_, l)) = &self.bg {
             if bg_ease > 0.01 {
+                // Interlude dots make room like a line does, so the vocal sits under
+                // them instead of across them.
                 let main_h = match (&self.cur.line, self.cur.key) {
                     (Some(m), _) => m.layout.height,
+                    (None, Key::Dots { .. }) => dots_height(s),
                     _ => 0.0,
                 };
                 let y = if main_h > 0.0 {
@@ -492,12 +524,12 @@ impl LyricStrip {
     /// down to a floor; anything still wider scrolls with the sweep.
     fn build_line(&self, f: &Factories, i: usize, bg: bool, avail: f32) -> Option<LineVis> {
         let ly = self.lyrics.as_ref()?;
-        let (text, sylls, start) = if bg {
+        let (text, sylls, start, end) = if bg {
             let b = ly.bg.get(i)?;
-            (&b.text, b.sylls.as_deref(), b.start)
+            (&b.text, b.sylls.as_deref(), b.start, b.end)
         } else {
             let l = ly.lines.get(i)?;
-            (&l.text, l.sylls.as_deref(), l.start)
+            (&l.text, l.sylls.as_deref(), l.start, l.end)
         };
         let fmt = if bg { self.bg_fmt.as_ref()? } else { self.main_fmt.as_ref()? };
         let shown = timeline::display_text(text, sylls);
@@ -529,7 +561,7 @@ impl LyricStrip {
                 })
                 .collect()
         });
-        Some(LineVis { layout, spans, start, mask: Default::default() })
+        Some(LineVis { layout, spans, start, end, mask: Default::default() })
     }
 }
 
@@ -545,8 +577,25 @@ fn sweep_head(l: &LineVis, t: f64, s: f32, font_px: f32) -> f32 {
     x / w * (w + feather(s, font_px))
 }
 
+/// The point a too-wide row scrolls to keep in view, in layout pixels: the sweep
+/// head with syllable timing; without it the whole line lights at once, so follow
+/// the line's own progress instead of jumping straight to its end.
+fn scroll_point(l: &LineVis, t: f64, s: f32, font_px: f32) -> f32 {
+    let w = l.layout.width;
+    match l.spans {
+        Some(_) => sweep_head(l, t, s, font_px).min(w),
+        None => w * timeline::line_progress(l.start, l.end, t),
+    }
+}
+
 fn feather(s: f32, font_px: f32) -> f32 {
     font_px * s * 0.9
+}
+
+/// The height the interlude dots take up (largest dot, with a little air), for
+/// stacking a background vocal under them.
+fn dots_height(s: f32) -> f32 {
+    2.0 * 3.2 * 1.18 * 1.12 * s + 2.0 * s
 }
 
 /// Per dot fill 0..1 (three dots) and an overall scale for the exit.
@@ -587,10 +636,17 @@ impl DrawCtx<'_> {
                 let center = (self.h - l.layout.height) / 2.0;
                 // Only the current line makes room for a background vocal.
                 let lifted = ((self.h - l.layout.height - self.bg_h) / 2.0).max(1.0);
-                let y = if current { center + (lifted - center) * self.bg_ease } else { center };
+                let lift = if current { self.bg_ease } else { row.lift };
+                let y = center + (lifted - center) * lift;
                 self.line(l, &self.res.main, y + dy, alpha, self.cfg.main_font_px as f32);
             }
-            Key::Dots { start, end } => self.dots(start, end, dy, alpha),
+            Key::Dots { start, end } => {
+                let dh = dots_height(self.s);
+                let center = self.h / 2.0;
+                let lifted = ((self.h - dh - self.bg_h) / 2.0).max(1.0) + dh / 2.0;
+                let lift = if current { self.bg_ease } else { row.lift };
+                self.dots(start, end, (lifted - center) * lift + dy, alpha)
+            }
         }
     }
 
@@ -598,7 +654,7 @@ impl DrawCtx<'_> {
         let lw = l.layout.width;
         let head = sweep_head(l, self.t, self.s, font_px);
         let x = if lw > self.avail {
-            self.pad - layout::follow_scroll(lw, self.avail, head.min(lw))
+            self.pad - layout::follow_scroll(lw, self.avail, scroll_point(l, self.t, self.s, font_px))
         } else {
             layout::align_x(&self.cfg.align, lw, self.w, self.pad)
         };

@@ -118,10 +118,11 @@ pub fn sweep_x(spans: Option<&[SegSpan]>, line_start: f64, full_w: f32, t: f64) 
         if t >= s.end {
             x = s.x1;
         } else if t >= s.start {
+            // Linear within the syllable, as the prototype does: an eased curve per
+            // syllable stops the sweep dead at every boundary, so a run of syllables
+            // stutters instead of flowing. The soft edge already hides the steps.
             let p = ((t - s.start) / (s.end - s.start).max(1.0)) as f32;
-            // Ease the sweep through each syllable a little: it reads as sung rather
-            // than wiped, and never lags the syllable's own timing at the ends.
-            return s.x0 + (s.x1 - s.x0) * ease_in_out_sine(p);
+            return s.x0 + (s.x1 - s.x0) * p.clamp(0.0, 1.0);
         } else {
             break;
         }
@@ -132,6 +133,23 @@ pub fn sweep_x(spans: Option<&[SegSpan]>, line_start: f64, full_w: f32, t: f64) 
 /// Which segment is being sung at `t` (for the active-syllable lift), if any.
 pub fn active_seg(spans: &[SegSpan], t: f64) -> Option<usize> {
     spans.iter().position(|s| t >= s.start && t < s.end)
+}
+
+/// Progress 0..1 through a line by its own timing (for scrolling a line that has
+/// no syllable timing and is too wide for the strip).
+pub fn line_progress(start: f64, end: f64, t: f64) -> f32 {
+    ((t - start) / (end - start).max(1.0)).clamp(0.0, 1.0) as f32
+}
+
+/// The step to advance per-frame animations by. The frame loop sleeps while nothing
+/// moves, so the first frame after a pause sees a long gap: treat it as one ordinary
+/// frame, or every fade would jump halfway in its first frame.
+pub fn frame_dt_ms(gap_ms: f32) -> f32 {
+    if gap_ms > 100.0 {
+        1000.0 / 60.0
+    } else {
+        gap_ms.clamp(0.0, 50.0)
+    }
 }
 
 /// Interlude progress 0..1 through a gap.
@@ -216,7 +234,10 @@ mod tests {
             SegSpan { start: 200.0, end: 300.0, x0: 50.0, x1: 120.0 },
         ];
         assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, -1.0), 0.0);
-        assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 50.0), 25.0); // eased midpoint is the midpoint
+        assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 50.0), 25.0);
+        // Linear through a syllable: no stall at its ends.
+        assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 10.0), 5.0);
+        assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 290.0), 113.0);
         assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 150.0), 50.0); // between segments: hold
         assert_eq!(sweep_x(Some(&spans), 0.0, 120.0, 400.0), 120.0);
         assert_eq!(sweep_x(None, 10.0, 120.0, 5.0), 0.0);
@@ -246,5 +267,16 @@ mod tests {
         assert_eq!(approach(0.0, 1.0, 50.0, 100.0), 0.5);
         assert_eq!(approach(0.9, 1.0, 50.0, 100.0), 1.0);
         assert_eq!(approach(0.3, 0.0, 50.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn first_frame_after_idle_is_one_frame_not_a_jump() {
+        assert!((frame_dt_ms(16.0) - 16.0).abs() < 1e-6);
+        assert!((frame_dt_ms(5_000.0) - 1000.0 / 60.0).abs() < 1e-3);
+        assert_eq!(frame_dt_ms(80.0), 50.0);
+        // A fade from 0 over 180 ms starts small after a long sleep.
+        assert!(approach(0.0, 1.0, frame_dt_ms(5_000.0), 180.0) < 0.1);
+        assert_eq!(line_progress(1000.0, 3000.0, 2000.0), 0.5);
+        assert_eq!(line_progress(1000.0, 3000.0, 0.0), 0.0);
     }
 }
