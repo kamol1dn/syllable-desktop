@@ -492,11 +492,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\temp\\lyrics spicy\\TaskbarLyrics\\TaskbarLyrics.csproj",
+      "projectUniqueName": "D:\\projects\\lyrics spicy\\TaskbarLyrics\\TaskbarLyrics.csproj",
       "projectName": "TaskbarLyrics",
-      "projectPath": "D:\\temp\\lyrics spicy\\TaskbarLyrics\\TaskbarLyrics.csproj",
+      "projectPath": "D:\\projects\\lyrics spicy\\TaskbarLyrics\\TaskbarLyrics.csproj",
       "packagesPath": "C:\\Users\\User\\.nuget\\packages\\",
-      "outputPath": "D:\\temp\\lyrics spicy\\TaskbarLyrics\\obj\\",
+      "outputPath": "D:\\projects\\lyrics spicy\\TaskbarLyrics\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\User\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -561,7 +561,7 @@
             "privateAssets": "none"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.425/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.428/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

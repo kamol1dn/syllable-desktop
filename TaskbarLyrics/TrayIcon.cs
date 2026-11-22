@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows.Threading;
 using Application = System.Windows.Application;
 using Forms = System.Windows.Forms;
+using TaskbarLyrics.Settings;
 
 namespace TaskbarLyrics;
 
@@ -10,6 +11,8 @@ namespace TaskbarLyrics;
 public sealed class TrayIcon : IDisposable
 {
     private readonly Forms.NotifyIcon _icon;
+    private readonly SettingsHost _settingsHost;
+    private SettingsWindow? _settings;
 
     public TrayIcon(Config cfg, OverlayWindow overlay, VisualizerWindow viz, AppNameWindow appName,
         WallpaperFeed feed, Application app)
@@ -75,6 +78,40 @@ public sealed class TrayIcon : IDisposable
             Visible = true,
             ContextMenuStrip = menu,
         };
+
+        // The settings window: left-click the icon, or "Settings..." at the top of the menu.
+        _settingsHost = new SettingsHost(cfg, overlay, viz, appName, feed);
+        menu.Items.Insert(0, new Forms.ToolStripMenuItem("Settings...", null, (_, _) => OpenSettings())
+        {
+            Font = new Font(menu.Font, System.Drawing.FontStyle.Bold),
+        });
+        menu.Items.Insert(1, new Forms.ToolStripSeparator());
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == Forms.MouseButtons.Left) OpenSettings();
+        };
+
+        // "TaskbarLyrics.exe --settings" (or --settings=lock) opens the window straight away.
+        var arg = Environment.GetCommandLineArgs().Skip(1)
+            .FirstOrDefault(a => a.StartsWith("--settings", StringComparison.OrdinalIgnoreCase));
+        if (arg != null)
+            app.Dispatcher.BeginInvoke(() => OpenSettings(arg.Contains('=') ? arg[(arg.IndexOf('=') + 1)..] : null));
+    }
+
+    /// <summary>Show the settings window (one instance), optionally on a section:
+    /// taskbar | desktop | lock | lyrics | about.</summary>
+    public void OpenSettings(string? section = null)
+    {
+        if (_settings == null)
+        {
+            _settings = new SettingsWindow(_settingsHost);
+            _settings.Closed += (_, _) => _settings = null;
+        }
+        if (section != null) _settings.ShowSection(section);
+        if (_settings.WindowState == System.Windows.WindowState.Minimized)
+            _settings.WindowState = System.Windows.WindowState.Normal;
+        _settings.Show();
+        _settings.Activate();
     }
 
     /// <summary>
@@ -339,7 +376,11 @@ public sealed class TrayIcon : IDisposable
             () => new[] { ("all", "All") }.Concat(feed.Categories().Select(c => (c, Title(c)))).ToArray(),
             () => s.Collection, v => s.Collection = v);
         Choice("Layout",
-            () => new[] { ("split", "Cover + lyrics"), ("lyrics", "Lyrics only"), ("lock", "Centred (lock screen)") },
+            () => new[]
+            {
+                ("split", "Cover + lyrics"), ("mirror", "Lyrics + cover (mirrored)"), ("lyrics", "Lyrics only"),
+                ("karaoke", "Karaoke (one big line)"), ("corner", "Corner panel"), ("lock", "Centred (lock screen)"),
+            },
             () => s.Layout, v => s.Layout = v);
         root.DropDownItems.Add(new Forms.ToolStripSeparator());
 
@@ -379,6 +420,7 @@ public sealed class TrayIcon : IDisposable
 
     public void Dispose()
     {
+        _settings?.Close();
         _icon.Visible = false;
         _icon.Dispose();
     }

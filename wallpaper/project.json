@@ -105,7 +105,11 @@
 				"options" :
 				[
 					{ "label" : "Cover + lyrics", "value" : "split" },
-					{ "label" : "Lyrics only", "value" : "lyrics" }
+					{ "label" : "Lyrics + cover (mirrored)", "value" : "mirror" },
+					{ "label" : "Lyrics only", "value" : "lyrics" },
+					{ "label" : "Karaoke (one big line)", "value" : "karaoke" },
+					{ "label" : "Corner panel", "value" : "corner" },
+					{ "label" : "Centred (lock screen)", "value" : "lock" }
 				]
 			},
 			"lyricssize" :

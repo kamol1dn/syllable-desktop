@@ -1,5 +1,7 @@
 {
   "Port": 9012,
+  "LyricsEnabled": true,
+  "LyricsHideOnDesktop": true,
   "Placement": "taskbar",
   "VPos": "top",
   "Align": "center",
@@ -13,19 +15,19 @@
   "UnsungAlpha": 100,
   "BgLineAlpha": 150,
   "InterludeGapMs": 2500,
-  "GlobalOffsetMs": 0,
+  "GlobalOffsetMs": 100,
   "AppNameEnabled": true,
   "AppNamePlacement": "taskbar",
   "AppNameVPos": "top",
   "AppNameAlign": "right",
-  "AppNameXOffset": 400,
+  "AppNameXOffset": 450,
   "AppNameWidth": 260,
   "AppNameFontPx": 13,
   "AppNameAlpha": 230,
   "VizEnabled": false,
   "VizPreset": "glow-taskbar",
   "VizRandomizeOnTrack": false,
-  "VizEdge": "bottom",
+  "VizEdge": "top",
   "VizHeightFraction": 0.33,
   "VizOpacity": 0.55,
   "WallpaperFolder": "C:\\Users\\User\\Pictures\\Wallpapers",
@@ -34,7 +36,7 @@
     "Collection": "all",
     "Layout": "split",
     "LyricsSize": 100,
-    "Dim": 35,
+    "Dim": 50,
     "WallpaperBlur": 0,
     "KenBurns": true,
     "AudioReactive": true,
@@ -45,7 +47,7 @@
   "WallpaperLock": {
     "Background": "wallpapers",
     "Collection": "all",
-    "Layout": "lock",
+    "Layout": "corner",
     "LyricsSize": 100,
     "Dim": 45,
     "WallpaperBlur": 0,
@@ -53,6 +55,6 @@
     "AudioReactive": true,
     "LineBlur": true,
     "SpicyFont": true,
-    "Clock": false
+    "Clock": true
   }
 }

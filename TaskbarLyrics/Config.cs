@@ -139,7 +139,12 @@ public sealed class Config
         {
             Log.Write($"config: save failed: {ex.Message}");
         }
+        Saved?.Invoke();
     }
+
+    /// <summary>Raised after every <see cref="Save"/>, whoever made the change (tray, settings
+    /// window, a module) — lets the settings window stay in step with the tray.</summary>
+    public event Action? Saved;
 }
 
 /// <summary>
@@ -154,7 +159,10 @@ public sealed class WallpaperSettings
     /// <summary>"all", or a subfolder / filename-prefix category of the folder.</summary>
     public string Collection { get; set; } = "all";
 
-    /// <summary>"split" (cover + lyrics), "lyrics" (lyrics only) or "lock" (centred, under Windows' clock).</summary>
+    /// <summary>
+    /// "split" (cover + lyrics), "mirror" (lyrics + cover), "lyrics" (lyrics only), "karaoke" (one big
+    /// centred line), "corner" (compact panel bottom-right) or "lock" (centred, under Windows' clock).
+    /// </summary>
     public string Layout { get; set; } = "split";
 
     public int LyricsSize { get; set; } = 100;    // %

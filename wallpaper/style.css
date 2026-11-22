@@ -71,6 +71,14 @@ body[data-bg="wallpapers"][data-layout="lyrics"]:not(.idle) #scrim::after {
 body[data-bg="wallpapers"][data-layout="lock"]:not(.idle) #scrim::after {
   background: linear-gradient(to bottom, transparent 28%, rgba(0, 0, 0, 0.34) 58%, rgba(0, 0, 0, 0.45) 100%);
 }
+body[data-bg="wallpapers"][data-layout="mirror"]:not(.idle) #scrim::after {
+  background: linear-gradient(270deg, transparent 25%, rgba(0, 0, 0, 0.32) 55%, rgba(0, 0, 0, 0.4) 100%);
+}
+body[data-bg="wallpapers"][data-layout="karaoke"]:not(.idle) #scrim::after {
+  background: radial-gradient(80% 45% at 50% 48%, rgba(0, 0, 0, 0.42), transparent);
+}
+/* The corner panel brings its own backing; leave the rest of the picture alone. */
+body[data-layout="corner"] #scrim::after { display: none; }
 
 /* ---------------- layout ---------------- */
 #stage {
@@ -87,6 +95,12 @@ body.idle #stage { opacity: 0; }
 
 body[data-layout="lyrics"] #stage { grid-template-columns: minmax(0, 1fr); padding-inline: 16vw; }
 body[data-layout="lyrics"] #card { display: none; }
+
+/* Split, mirrored: lyrics on the left, the card on the right edge. */
+body[data-layout="mirror"] #stage { grid-template-columns: minmax(0, 1fr) minmax(0, 30vw); }
+body[data-layout="mirror"] #card { order: 2; }
+body[data-layout="mirror"] #card,
+body[data-layout="mirror"] #card .info { align-items: flex-end; }
 
 /* No lyrics for this song: the card takes the stage on its own. */
 body.nolyrics #stage { grid-template-columns: minmax(0, 32vw); justify-content: center; }
@@ -234,7 +248,7 @@ body.loading #loader { opacity: 0.6; }
    Windows draws its clock and date over the top of the lock screen, so the lyrics
    live in the lower part, centred, and the card shrinks to a strip at the
    bottom-left (the bottom-right holds Windows' status icons). */
-body[data-layout="lock"] #stage {
+body:is([data-layout="lock"], [data-layout="karaoke"]) #stage {
   display: block;
   padding: 0;
 }
@@ -245,41 +259,87 @@ body[data-layout="lock"] #lyrics {
   height: auto;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 5%, #000 18%, #000 78%, transparent 96%);
 }
-body[data-layout="lock"] .line,
-body[data-layout="lock"] .row.opp .line { justify-content: center; text-align: center; }
-body[data-layout="lock"] .dotGroup,
-body[data-layout="lock"] .row.opp .dotGroup { justify-content: center; }
-body[data-layout="lock"] #loader { left: 50%; transform: translateX(-50%); }
+body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.line, .row.opp .line) { justify-content: center; text-align: center; }
+body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.dotGroup, .row.opp .dotGroup) { justify-content: center; }
+body:is([data-layout="lock"], [data-layout="karaoke"]) #loader { left: 50%; transform: translateX(-50%); }
 
-body[data-layout="lock"] #card {
+/* The card as a one-row strip: small cover, title/artist and the progress bar. */
+body:is([data-layout="lock"], [data-layout="karaoke"]) #card {
   position: absolute;
   left: 4vw; bottom: 5vh;
   flex-direction: row; align-items: center;
   gap: 1.6vh;
   max-width: 36vw;
 }
-body[data-layout="lock"] .coverWrap { width: 8.5vh; border-radius: 1vh; box-shadow: 0 1vh 3vh rgba(0, 0, 0, 0.45); }
-body[data-layout="lock"] .info { gap: 1vh; }
-body[data-layout="lock"] .meta,
-body[data-layout="lock"] .progress { width: 26vh; }
-body[data-layout="lock"] #title { font-size: 2.3vh; -webkit-line-clamp: 1; }
-body[data-layout="lock"] #artist { font-size: 1.7vh; margin-top: 0.3vh; }
-body[data-layout="lock"] #album { display: none; }
-body[data-layout="lock"] .bar { height: 0.35vh; }
-body[data-layout="lock"] .times { font-size: 1.3vh; margin-top: 0.5vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) .coverWrap { width: 8.5vh; border-radius: 1vh; box-shadow: 0 1vh 3vh rgba(0, 0, 0, 0.45); }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) .info { gap: 1vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.meta, .progress) { width: 26vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) #title { font-size: 2.3vh; -webkit-line-clamp: 1; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) #artist { font-size: 1.7vh; margin-top: 0.3vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) #album { display: none; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) .bar { height: 0.35vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"], [data-layout="corner"]) .times { font-size: 1.3vh; margin-top: 0.5vh; }
 
 /* No lyrics: a bigger card, centred in the space under the clock. */
-body[data-layout="lock"].nolyrics #card {
+body:is([data-layout="lock"], [data-layout="karaoke"]).nolyrics #card {
   left: 50%; bottom: auto; top: 62vh;
   transform: translate(-50%, -50%);
   flex-direction: column; text-align: center;
   max-width: 40vw;
 }
-body[data-layout="lock"].nolyrics .coverWrap { width: 26vh; border-radius: 1.4vh; }
-body[data-layout="lock"].nolyrics #title { font-size: 3.2vh; }
-body[data-layout="lock"].nolyrics #artist { font-size: 2.2vh; }
-body[data-layout="lock"].nolyrics .meta,
-body[data-layout="lock"].nolyrics .progress { width: 34vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"]).nolyrics .coverWrap { width: 26vh; border-radius: 1.4vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"]).nolyrics #title { font-size: 3.2vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"]).nolyrics #artist { font-size: 2.2vh; }
+body:is([data-layout="lock"], [data-layout="karaoke"]).nolyrics :is(.meta, .progress) { width: 34vh; }
+
+/* ---------------- karaoke layout ----------------
+   One big line in the middle of the screen with the next one waiting below;
+   everything else shrinks and fades out. The strip sits bottom-centre. */
+body[data-layout="karaoke"] #lyrics {
+  position: absolute;
+  left: 8vw; right: 8vw;
+  top: 24vh; bottom: 26vh;
+  height: auto;
+  font-size: calc(var(--fs) * 1.4);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 4%, #000 30%, #000 72%, transparent 97%);
+}
+body[data-layout="karaoke"] .row.lyric {
+  transform: scale(0.7);
+  transition: opacity 0.25s cubic-bezier(0.61, 1, 0.88, 1), transform 0.55s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+body[data-layout="karaoke"] .row.lyric.act { transform: none; }
+body[data-layout="karaoke"] .row.lyric.sung { opacity: 0.3; }
+body[data-layout="karaoke"] #card { left: 50%; bottom: 9vh; transform: translateX(-50%); }
+body[data-layout="karaoke"].nolyrics #card { top: 50vh; }
+
+/* ---------------- corner layout ----------------
+   A compact frosted panel in the bottom-right, above the taskbar: the strip on
+   top, a few lines of lyrics under it. The wallpaper keeps the rest. */
+body[data-layout="corner"] #stage {
+  inset: auto 3vw 9vh auto;
+  width: 30vw;
+  height: 46vh;
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 1.4vh;
+  padding: 2.4vh 2.4vh 1vh;
+  border-radius: 2vh;
+  background: rgba(10, 10, 14, 0.34);
+  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+  backdrop-filter: blur(28px) saturate(1.4);
+  box-shadow: 0 2vh 6vh rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+body[data-layout="corner"] #card { flex-direction: row; align-items: center; gap: 1.6vh; flex: none; }
+body[data-layout="corner"] .info { flex: 1; min-width: 0; }
+body[data-layout="corner"] :is(.meta, .progress) { width: auto; }
+body[data-layout="corner"] #lyrics {
+  flex: 1; height: auto;
+  font-size: calc(var(--fs) * 0.6);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 12%, #000 82%, transparent 100%);
+}
+/* No lyrics: just the strip. */
+body[data-layout="corner"].nolyrics #stage { height: auto; padding-bottom: 2.4vh; }
+body[data-layout="corner"].nolyrics #card { text-align: left; }
+body[data-layout="corner"].nolyrics #card .info { align-items: stretch; }
 
 /* ---------------- idle clock ---------------- */
 #clock {

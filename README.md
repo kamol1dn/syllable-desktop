@@ -208,9 +208,17 @@ running (e.g. the lock screen before login).
 - *Album gradient*: the cover warped, rotated and heavily blurred in WebGL, flowing
   faster on bass hits (spicy-lyrics' "dynamic background").
 
-**Layouts** — *Cover + lyrics* (default desktop), *Lyrics only*, and *Centred* (default
-lock screen: lyrics below Windows' clock, now-playing strip bottom-left, no second clock).
-A song without synced lyrics shows just the card, centred.
+**Layouts**
+- *Cover + lyrics* (default desktop), or *Lyrics + cover* for the mirror image.
+- *Lyrics only*.
+- *Karaoke*: the current line large in the middle of the screen, the next one waiting
+  below, and a slim now-playing strip at the bottom.
+- *Corner panel*: a small frosted panel above the taskbar in the bottom-right, holding the
+  strip and a few lines of lyrics. The wallpaper keeps the rest of the screen.
+- *Centred* (default lock screen): lyrics below Windows' clock, now-playing strip
+  bottom-left, no second clock.
+
+A song without synced lyrics shows just the card, centred (in *Corner panel*, just the strip).
 
 **Entry points and settings**
 

@@ -15,7 +15,9 @@ window.WALLPAPER_CONFIG = {
   dynspeed: 100,         // gradient speed, %
   audioreactive: true,   // gradient pulses with the bass
 
-  layout: "split",       // "split" (cover + lyrics) or "lyrics"
+  // "split" (cover + lyrics), "mirror" (lyrics + cover), "lyrics" (lyrics only),
+  // "karaoke" (one big centred line), "corner" (small panel bottom-right), "lock" (centred)
+  layout: "split",
   lyricssize: 100,       // %
   linepos: 45,           // active line height, % of the screen
   lineblur: true,        // blur lines away from the current one
