@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use syllable_core::{log, position, Bus, Context, Event, TrackInfo};
 
-use clock::{Clock, Sample};
+use clock::{Clock, Sample, Write};
 use session::{Msg, Snapshot};
 
 const POLL: Duration = Duration::from_millis(500);
@@ -134,6 +134,13 @@ struct Watcher {
     pending: Option<(Option<String>, Instant)>,
     /// Identity + source of the previous poll, to restart the clock on a change.
     observed: Option<(String, String)>,
+    /// The clock's latest write while a new identity is pending, and when it was made.
+    /// The clock restarts on the very poll the song changes, but the change itself is
+    /// published only after the debounce; writing the new song's position before that
+    /// would play the previous song's lyrics from the new position (from ~0) for up to
+    /// a debounce. Applied right before `TrackChanged`, or dropped if the identity
+    /// flickers back.
+    held: Option<(Write, Instant)>,
     /// Last known playing state (kept through "changing").
     playing: bool,
     published_playing: Option<bool>,
@@ -154,6 +161,7 @@ impl Watcher {
             emitted: None,
             pending: None,
             observed: None,
+            held: None,
             playing: false,
             published_playing: None,
             art: ArtState { key: None, hash: None, since: Instant::now(), last_read: None },
@@ -221,7 +229,12 @@ impl Watcher {
         }
         let sample = Sample { playing: self.playing, rate: snap.rate, timeline: snap.timeline };
         if let Some(w) = self.clock.update(&sample, self.mono_ms(), wall_unix_ms()) {
-            position::set(w.position_ms, w.playing, w.rate);
+            if self.emitted.as_ref().map(|t| t.key()).as_ref() == Some(&key) {
+                self.held = None;
+                position::set(w.position_ms, w.playing, w.rate);
+            } else {
+                self.held = Some((w, Instant::now()));
+            }
         }
         if self.published_playing != Some(self.playing) {
             self.published_playing = Some(self.playing);
@@ -249,6 +262,7 @@ impl Watcher {
             return;
         }
         self.clock.clear();
+        self.held = None;
         position::clear();
         self.observed = None;
         self.art = ArtState { key: None, hash: None, since: Instant::now(), last_read: None };
@@ -266,6 +280,7 @@ impl Watcher {
         let key = info.as_ref().map(TrackInfo::key);
         if key == self.emitted.as_ref().map(|t| t.key()) {
             self.pending = None;
+            self.apply_held();
             return false;
         }
         let hold = if is_spotify { DEBOUNCE_SPOTIFY } else { DEBOUNCE };
@@ -294,8 +309,18 @@ impl Watcher {
             None => log!("media: track -> (none)"),
         }
         self.emitted = info.clone();
+        // The new song's clock goes live together with the song, not before it.
+        self.apply_held();
         self.bus.publish(Event::TrackChanged(info));
         true
+    }
+
+    /// Write the clock update held back during a pending change, carried forward to now.
+    fn apply_held(&mut self) {
+        if let Some((w, at)) = self.held.take() {
+            let ms = if w.playing { w.position_ms + at.elapsed().as_secs_f64() * 1000.0 * w.rate } else { w.position_ms };
+            position::set(ms, w.playing, w.rate);
+        }
     }
 
     fn artwork(&mut self, key: &str, thumb: Option<&windows::Storage::Streams::IRandomAccessStreamReference>) {
@@ -337,4 +362,55 @@ impl Watcher {
 
 fn wall_unix_ms() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::Timeline;
+    use std::thread::sleep;
+
+    fn spotify(title: &str, position_ms: f64, updated_unix_ms: f64) -> Snapshot {
+        Snapshot {
+            source_app: "Spotify.exe".into(),
+            title: title.into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            playing: Some(true),
+            rate: 1.0,
+            timeline: Some(Timeline { position_ms, updated_unix_ms: Some(updated_unix_ms) }),
+            duration_ms: 200_000.0,
+            thumbnail: None,
+        }
+    }
+
+    // The new song's clock must not go live before the song does: until TrackChanged
+    // the page and the strip still show the previous song's lyrics.
+    #[test]
+    fn the_new_songs_position_waits_for_the_track_change() {
+        let bus = Bus::new();
+        let events = bus.subscribe();
+        let mut w = Watcher::new(bus);
+        let a_at = wall_unix_ms();
+        w.observe(spotify("A", 180_000.0, a_at));
+        sleep(DEBOUNCE_SPOTIFY + Duration::from_millis(30));
+        w.observe(spotify("A", 180_000.0, a_at));
+        assert_eq!(w.emitted.as_ref().map(|t| t.title.as_str()), Some("A"));
+        let at_a = position::now_ms().unwrap();
+        assert!(at_a >= 180_000.0, "{at_a}");
+
+        // Next song: the session still carries A's timeline, so the clock restarts at 0...
+        let stale = a_at;
+        w.observe(spotify("B", 180_000.0, stale));
+        let still_a = position::now_ms().unwrap();
+        assert!(still_a >= 180_000.0, "B's position went live before B: {still_a}");
+
+        // ...and goes live together with TrackChanged(B).
+        sleep(DEBOUNCE_SPOTIFY + Duration::from_millis(30));
+        w.observe(spotify("B", 180_000.0, stale));
+        assert_eq!(w.emitted.as_ref().map(|t| t.title.as_str()), Some("B"));
+        let at_b = position::now_ms().unwrap();
+        assert!(at_b < 1_000.0, "{at_b}");
+        assert!(events.try_iter().any(|e| matches!(e, Event::TrackChanged(Some(ref t)) if t.title == "B")));
+    }
 }

@@ -101,14 +101,18 @@ pub fn art(bytes: &[u8]) -> Option<Value> {
 }
 
 /// `now_ms` is the playback clock (`None` when nothing plays); the sync offset is added here,
-/// the same nudge the taskbar applies, so both show the same line.
-pub fn position(now_ms: Option<f64>, playing: bool, offset_ms: i32) -> Value {
+/// the same nudge the taskbar applies, so both show the same line. `rate` is the rate the
+/// clock runs at, which the page extrapolates with: while the clock slews off a small
+/// backward correction it runs slower than 1, and a page assuming 1 would run ahead and
+/// be pulled back on every message, so the sweep would stutter backwards.
+pub fn position(now_ms: Option<f64>, playing: bool, rate: f64, offset_ms: i32) -> Value {
+    let rate = if rate.is_finite() && rate > 0.0 { rate } else { 1.0 };
     json!({
         "type": "pos",
         "has": now_ms.is_some(),
         "ms": now_ms.unwrap_or(0.0) + offset_ms as f64,
         "playing": playing,
-        "rate": 1.0,
+        "rate": rate,
     })
 }
 
@@ -239,10 +243,17 @@ mod tests {
 
     #[test]
     fn position_adds_the_offset_and_says_when_nothing_plays() {
-        assert_eq!(position(Some(1000.0), true, 250), json!({ "type": "pos", "has": true, "ms": 1250.0, "playing": true, "rate": 1.0 }));
-        let p = position(None, false, 0);
+        assert_eq!(position(Some(1000.0), true, 1.0, 250), json!({ "type": "pos", "has": true, "ms": 1250.0, "playing": true, "rate": 1.0 }));
+        let p = position(None, false, 1.0, 0);
         assert_eq!(p["has"], false);
         assert_eq!(p["ms"], 0.0);
+    }
+
+    #[test]
+    fn position_carries_the_clock_rate() {
+        assert_eq!(position(Some(0.0), true, 0.9, 0)["rate"], 0.9);
+        assert_eq!(position(Some(0.0), true, 0.0, 0)["rate"], 1.0);
+        assert_eq!(position(Some(0.0), true, f64::NAN, 0)["rate"], 1.0);
     }
 
     #[test]

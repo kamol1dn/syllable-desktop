@@ -106,6 +106,12 @@ pub fn start(ctx: Context) {
     thread::Builder::new().name("wallpaper-feed-accept".into()).spawn(move || accept_loop(s)).ok();
 }
 
+/// The playback clock as the page wants it (sync offset added).
+fn position_msg(ctx: &Context) -> Value {
+    let offset = ctx.config.read().global_offset_ms;
+    protocol::position(position::now_ms(), position::playing(), position::rate(), offset)
+}
+
 fn bus_loop(shared: Arc<Shared>, events: Receiver<Event>) {
     while let Ok(event) = events.recv() {
         match event {
@@ -115,7 +121,10 @@ fn bus_loop(shared: Arc<Shared>, events: Receiver<Event>) {
                 s.track = Some(track.clone());
                 s.lyrics = lyrics.clone();
                 s.art = None; // the new song's cover follows as Event::Artwork
-                vec![track, lyrics]
+                // The new song's position right behind it (the media clock restarted
+                // before this event), not on the next 250 ms tick: until then the page
+                // would still run the previous song's clock under the new song.
+                vec![track, lyrics, text(&position_msg(&shared.ctx))]
             }),
             Event::TrackUpdated(info) => shared.publish(|s| {
                 let track = text(&protocol::track(Some(&info)));
@@ -301,8 +310,7 @@ fn run(shared: &Shared, id: u64, ws: &mut WebSocket<TcpStream>, rx: &Receiver<Te
         if last_pos.is_none_or(|t| t.elapsed() >= POS_EVERY) || playing != last_playing {
             last_pos = Some(Instant::now());
             last_playing = playing;
-            let offset = shared.ctx.config.read().global_offset_ms;
-            let m = protocol::position(position::now_ms(), playing, offset);
+            let m = position_msg(&shared.ctx);
             if let Err(e) = ws.write(Message::text(m.to_string())) {
                 return format!("write: {e}");
             }

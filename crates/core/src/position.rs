@@ -27,6 +27,12 @@ pub fn playing() -> bool {
     SNAP.read().unwrap().map(|s| s.playing).unwrap_or(false)
 }
 
+/// The rate the clock is running at: the player's rate, briefly slowed while the
+/// clock absorbs a small backward correction. 1.0 when nothing is playing.
+pub fn rate() -> f64 {
+    SNAP.read().unwrap().map(|s| s.rate).unwrap_or(1.0)
+}
+
 /// Current position in ms, or `None` when nothing is playing.
 pub fn now_ms() -> Option<f64> {
     let s = (*SNAP.read().unwrap())?;

@@ -78,6 +78,7 @@ const Demo = (() => {
       setLyrics("ok", lyrics);
     };
     next();
+    Clock.update(at, true, 1);
     setInterval(() => {
       let ms = performance.now() - t0;
       if (ms >= total) { t0 = performance.now(); ms = 0; next(); }

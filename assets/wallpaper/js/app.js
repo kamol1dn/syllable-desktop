@@ -342,20 +342,44 @@ let maxFps = settings.fps || 60, lastFrame = 0, lastDraw = 0, looping = false;
 function startLoop() {
   if (looping) return;
   looping = true;
+  // Back from a pause: the first frame must not see the whole pause as one step
+  // (the scroll would cover most of its way in a single frame).
+  lastFrame = 0;
+  lastTick = 0;
   requestAnimationFrame(loop);
 }
+
+// FPS cap (the fps setting), paced in whole display frames like the taskbar strip:
+// every vblank up to ~60-75 Hz, every 2nd (or 3rd) on faster displays. A plain
+// "at least 1000/fps ms since the last draw" lands on every 3rd vblank at 144 Hz
+// (48 fps) and every 2nd at 75 Hz (37 fps).
+let lastTick = 0, vsyncMs = 1000 / 60;
+const ticks = [];
+function trackVsync(now) {
+  const d = lastTick ? now - lastTick : 0;
+  lastTick = now;
+  if (!(d > 2 && d < 100)) return;
+  ticks.push(d);
+  if (ticks.length > 31) ticks.shift();
+  if (ticks.length >= 7) vsyncMs = ticks.slice().sort((a, b) => a - b)[ticks.length >> 1];
+}
+
 function loop(now) {
   if (hostPaused) { looping = false; return; }
   requestAnimationFrame(loop);
-  // FPS cap (the fps setting).
-  if (now - lastDraw < 1000 / maxFps - 1) return;
+  trackVsync(now);
+  const every = Math.max(1, Math.round(1000 / vsyncMs / maxFps));
+  if (lastDraw && now - lastDraw < (every - 0.5) * vsyncMs) return;
   const dt = Math.min(0.1, (now - (lastFrame || now)) / 1000);
   lastFrame = now;
   lastDraw = now;
   const t = Clock.now() + Number(settings.offset || 0);
   Background.frame(dt);
-  LyricsView.frame(t, dt);
-  updateChrome(t);
+  // After a song change the clock still runs on the previous song until the new
+  // song's first position arrives; drawing its lyrics at that time would show them
+  // scrolled to the end and fully sung, then sweep them all back.
+  if (Clock.has) LyricsView.frame(t, dt);
+  updateChrome(Clock.has ? t : 0);
 }
 
 // ---------------- boot ----------------
