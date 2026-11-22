@@ -1,182 +1,173 @@
-/* Look of the lyric renderer (js/lyric-view.js). Loaded after style.css.
+/* Look of the lyric renderer (js/lyric-view.js), ported from the Android app
+   (ui/LyricsView.kt, ui/LyricMotion.kt). Loaded after style.css.
    Selectors here are class-only on purpose, so the page layouts in style.css
    (body[data-layout=...] rules on .row / .line / .dotGroup) always win over them.
 
+   1 em is the phone's 30 sp lyric size, so its dp values are divided by 30 below.
    Numbers the engine animates arrive as custom properties:
-     --lx-k   0..1  how far the sweep has crossed a unit (or an interlude)
-     --lx-g   0..1  halo strength of a held letter
-     --lx-d   lines between a row and the current one (capped at --lx-reach)
-   Everything else below is a knob a style preset may turn (.lx-style-<id>). */
+     --lx-fa, --lx-fb   where the soft edge between sung and unsung starts and ends (0..1)
+     --lx-f0, --lx-f1   the alpha before and after it (LIT 0.85 .. UNLIT 0.35)
+     --lx-glow          strength of the blurred copy behind a word or letter
+     --lx-blur          blur of an inactive line, by its distance from the current one */
 
 .lx {
-  --lx-hi: 255 255 255;      /* sung text, r g b */
-  --lx-idle: 255 255 255;    /* text of lines that are not being sung */
-  --lx-glow: 255 255 255;    /* halo of held letters */
-  --lx-lo: 0.34;             /* alpha of the not-yet-sung part of the current line */
-  --lx-feather: 0.42em;      /* soft edge of the sweep (set from the preset) */
-  --lx-reach: 5;             /* lines after which distance stops mattering (set from the preset) */
-  --lx-near: 0.5;            /* opacity of the lines right next to the current one */
-  --lx-far: 0.15;            /* opacity at --lx-reach and beyond */
-  --lx-sung: 0.78;           /* extra dimming of lines already sung */
-  --lx-blur: 0.042em;        /* blur added per line of distance */
-  --lx-shrink: 0.04;         /* how much smaller a line is while it is not the current one */
-  --lx-gap-h: 1.7em;         /* height of an unfolded interlude row (set by the engine) */
-  --lx-ox: left;             /* where lines grow from; measured from the layout by the engine */
-  --lx-oxo: right;
-  --lx-ease: cubic-bezier(0.3, 0.7, 0.2, 1);
-}
-.lx.lx-noblur { --lx-blur: 0em; }
-
-/* Alpha of the not-yet-sung text, eased in step with the line's opacity when it
-   becomes the current one. Switched at once, the line's text fell from full to
-   --lx-lo while the line itself was still fading up from --lx-near, so a line
-   dimmed (all but vanished) on the frame its turn came. Registered so it can be
-   transitioned. */
-@property --lx-lo-a {
-  syntax: "<number>";
-  inherits: true;
-  initial-value: 1;
+  --lx-lit: 0.85;
+  --lx-unlit: 0.35;
+  --lx-padx: 0.06em;                       /* see .lx-u: the box reaches past the glyphs */
+  --lx-ease-line: cubic-bezier(0.61, 1, 0.88, 1);
+  --lx-ease-blur: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ---------------- rows ---------------- */
 .row {
-  --lx-d: var(--lx-reach);
-  padding: 0.36em 0;
-  opacity: 1;
+  padding: 0.3em 0;                        /* 9 dp */
+  opacity: 0.51;                           /* lines still to come */
+  transition: opacity 0.2s var(--lx-ease-line), filter 0.3s var(--lx-ease-blur);
 }
-.row.act, .row.sung { opacity: 1; }
+.row + .row { margin-top: 0.1333em; }      /* 4 dp between rows */
+.row.sung { opacity: 0.497; }
+.row.act { opacity: 1; }
+.row.lyric:not(.act) { filter: blur(var(--lx-blur, 0px)); }
+.lx-noblur .row.lyric:not(.act) { filter: none; }
 .row.lx-off { visibility: hidden; }
+/* Rows in the window get their own layers, so the scroll wave only moves layers and a
+   blurred line is drawn once, not on every frame of the wave. */
+.row:not(.lx-off) { will-change: translate; }
+/* A jump (new lyrics, a seek, a new size): rows appear at their final look. */
+.lx-snap .row, .lx-snap .row * { transition: none !important; }
 
 .line {
-  --lx-fade: calc((var(--lx-near) - var(--lx-far)) / max(1, var(--lx-reach) - 1));
   display: block;
   font-weight: 700;
-  line-height: 1.26;
-  letter-spacing: -0.012em;
-  opacity: max(var(--lx-far), calc(var(--lx-near) - (var(--lx-d) - 1) * var(--lx-fade)));
-  filter: blur(calc(var(--lx-d) * var(--lx-blur)));
-  transform: scale(calc(1 - var(--lx-shrink)));
-  transform-origin: var(--lx-ox) 50%;
-  --lx-lo-a: 1;
-  transition: opacity 0.5s var(--lx-ease), filter 0.5s var(--lx-ease), transform 0.65s var(--lx-ease), --lx-lo-a 0.5s var(--lx-ease);
+  line-height: 1.2;                        /* 36 sp on 30 sp */
+  letter-spacing: 0;
+  text-wrap: balance;                      /* the phone's BalancedFlow: even rows, no stray last word */
+  color: #fff;
 }
-.row.opp .line { text-align: end; transform-origin: var(--lx-oxo) 50%; }
-.row.sung .line { opacity: calc(max(var(--lx-far), calc(var(--lx-near) - (var(--lx-d) - 1) * var(--lx-fade))) * var(--lx-sung)); }
-.row.act .line { opacity: 1; filter: blur(0em); transform: none; --lx-lo-a: var(--lx-lo); }
-.lx-noblur .line, .lx-noblur .row.act .line { filter: none; }
+.row.opp .line { text-align: end; }
 
-/* background vocal: a smaller second line inside the row */
-.line.lx-sub { font-size: 0.58em; font-weight: 600; margin-top: 0.3em; letter-spacing: 0; --lx-lo: 0.28; }
-.row.act .line.lx-sub { opacity: 0.8; }
+/* background vocals: 0.7 size, semibold, 2 dp under the line, dimmed to 0.8 */
+.line.lx-sub { font-size: 0.7em; font-weight: 600; margin-top: 0.0952em; opacity: 0.8; }
 
-/* ---------------- words, timed units, letters ---------------- */
-.lx-w { display: inline-block; white-space: nowrap; }
+/* ---------------- words ---------------- */
+.lx-g { display: inline-block; white-space: pre; }
 .lx-u, .lx-c {
   display: inline-block;
-  /* The glyphs are painted through a clipped background, which stops at the box
-     edge; the box is grown past ascenders/descenders and pulled back with equal
-     negative margins so nothing is cut off and nothing moves. */
-  padding: 0.16em 0.06em 0.32em;
-  margin: -0.16em -0.06em -0.32em;
-  color: rgb(var(--lx-idle));
-  -webkit-text-fill-color: rgb(var(--lx-idle));
+  position: relative;
+  white-space: pre;
+  /* The glyphs are painted through a clipped background, which stops at the box edge;
+     the box is grown past ascenders/descenders and pulled back with equal negative
+     margins so nothing is cut off and nothing moves. The transform origin is moved
+     back to the middle of the glyph box. */
+  padding: 0.16em var(--lx-padx) 0.32em;
+  margin: -0.16em calc(-1 * var(--lx-padx)) -0.32em;
+  transform-origin: 50% calc(50% - 0.08em);
+  color: rgb(255 255 255 / var(--lx-unlit));
 }
-.lx-c { white-space: pre; }
+.lx-c { padding-top: 0.16em; }
+.lx-held { padding: 0; margin: 0; }
+.lx-held > .lx-c { transform-origin: 50% calc(50% - 0.08em); }
 
-/* Only the row being sung pays for the gradient. */
-.row.act :is(.lx-u, .lx-c) { --lx-k: 0; }
-.row.act :is(.lx-u:not(.lx-held), .lx-c),
-:is(.lx-u:not(.lx-held), .lx-c)[style*="--lx-k"] {
+/* At rest (not being sung): waiting words sit slightly small and low; sung ones at full
+   size. A held word rests as a whole, its letters plain. */
+.row:not(.lx-anim) .lx-u { transform: translate3d(0, 0.01em, 0) scale(0.95); }
+.row.sung:not(.lx-anim) .lx-u { transform: none; color: rgb(255 255 255 / var(--lx-lit)); }
+.row:not(.lx-anim) .lx-held > .lx-c { color: inherit; }
+
+/* Being sung: lit up to the soft edge, the glow a blurred copy behind. */
+.lx-anim .lx-u:not(.lx-held), .lx-anim .lx-c {
+  z-index: 0;
   color: transparent;
   -webkit-text-fill-color: transparent;
   background-image: linear-gradient(to right,
-    rgb(var(--lx-hi)) calc(var(--lx-k) * (100% + var(--lx-feather)) - var(--lx-feather)),
-    rgb(var(--lx-hi) / var(--lx-lo-a)) calc(var(--lx-k) * (100% + var(--lx-feather))));
+    rgb(255 255 255 / var(--lx-f0, var(--lx-unlit))) calc(var(--lx-padx) + var(--lx-fa, 0) * (100% - 2 * var(--lx-padx))),
+    rgb(255 255 255 / var(--lx-f1, var(--lx-unlit))) calc(var(--lx-padx) + var(--lx-fb, 0.0005) * (100% - 2 * var(--lx-padx))));
   -webkit-background-clip: text;
   background-clip: text;
 }
-.row.act .line[dir="rtl"] :is(.lx-u:not(.lx-held), .lx-c),
-.line[dir="rtl"] :is(.lx-u:not(.lx-held), .lx-c)[style*="--lx-k"] {
+.lx-anim .line[dir="rtl"] :is(.lx-u:not(.lx-held), .lx-c) {
   background-image: linear-gradient(to left,
-    rgb(var(--lx-hi)) calc(var(--lx-k) * (100% + var(--lx-feather)) - var(--lx-feather)),
-    rgb(var(--lx-hi) / var(--lx-lo-a)) calc(var(--lx-k) * (100% + var(--lx-feather))));
+    rgb(255 255 255 / var(--lx-f0, var(--lx-unlit))) calc(var(--lx-padx) + var(--lx-fa, 0) * (100% - 2 * var(--lx-padx))),
+    rgb(255 255 255 / var(--lx-f1, var(--lx-unlit))) calc(var(--lx-padx) + var(--lx-fb, 0.0005) * (100% - 2 * var(--lx-padx))));
 }
-.lx-c {
-  --lx-g: 0;
-  text-shadow: 0 0 calc(0.12em + var(--lx-g) * 0.5em) rgb(var(--lx-glow) / calc(var(--lx-g) * 0.62));
+.lx-anim .lx-u:not(.lx-held)::before, .lx-anim .lx-c::before {
+  content: attr(data-t);
+  position: absolute;
+  left: 0; top: 0;
+  padding: inherit;
+  z-index: -1;
+  white-space: pre;
+  color: #fff;
+  -webkit-text-fill-color: #fff;
+  background: none;
+  opacity: var(--lx-glow, 0);
+  /* BlurEffect(5 dp): sigma = 0.57735 r + 0.5 px */
+  filter: blur(calc(0.0962em + 0.5px));
+  pointer-events: none;
+}
+/* held letters glow wider: BlurEffect(9 dp) */
+.lx-anim .lx-c::before { filter: blur(calc(0.1732em + 0.5px)); }
+/* the same 5 / 9 dp for background vocals, whose em is 0.7 of the line's */
+.lx-anim .lx-sub .lx-u:not(.lx-held)::before { filter: blur(calc(0.1375em + 0.5px)); }
+.lx-anim .lx-sub .lx-c::before { filter: blur(calc(0.2474em + 0.5px)); }
+
+/* ---------------- line-timed lines ----------------
+   The whole line grows a little while it is sung and fills from top to bottom over its
+   length; at rest it is lit (sung) or unlit (to come). */
+.lx-whole {
+  width: 95%;                              /* room on the far side for it to grow into */
+  /* Grown below the last row so descenders aren't cut from the clipped fill, pulled back
+     so nothing moves; the fill and the origin are mapped back to the text. */
+  padding-bottom: 0.32em;
+  margin-bottom: -0.32em;
+  transform-origin: 0 calc(50% - 0.16em);
+  transform: scale(1);
+  transition: transform 0.2s cubic-bezier(0.37, 0, 0.63, 1);
+  color: rgb(255 255 255 / var(--lx-unlit));
+}
+.row.opp .lx-whole { margin-inline-start: auto; transform-origin: 100% calc(50% - 0.16em); }
+.lx-whole[dir="rtl"] { transform-origin: 100% calc(50% - 0.16em); }
+.row.opp .lx-whole[dir="rtl"] { transform-origin: 0 calc(50% - 0.16em); }
+.row.sung .lx-whole { color: rgb(255 255 255 / var(--lx-lit)); }
+.row.act .lx-whole {
+  transform: scale(1.05);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(to bottom,
+    rgb(255 255 255 / var(--lx-f0, var(--lx-lit))) calc(var(--lx-fa, 0) * (100% - 0.32em)),
+    rgb(255 255 255 / var(--lx-f1, var(--lx-unlit))) calc(var(--lx-fb, 0.2) * (100% - 0.32em)));
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 /* ---------------- interlude ----------------
-   A short track that fills over the break, with a breathing head. The row takes
-   no room until its break is playing. */
+   Three dots that pop up and brighten one after another, then fold away. The row takes
+   4 dp until its break is playing, then opens to the dots (height set by the engine). */
 .row.lx-gap {
-  height: 0; padding: 0; opacity: 0;
-  transition: height 0.44s var(--lx-ease), opacity 0.28s linear;
+  height: 0.1333em;
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+  opacity: 0;
+  filter: none;
+  transition: opacity 0.14s var(--lx-ease-blur);
 }
-.row.lx-gap.act { height: var(--lx-gap-h); opacity: 1; }
-.dotGroup { display: flex; align-items: center; gap: 0; height: var(--lx-gap-h); font-size: 1em; line-height: 1; }
-.row.opp .dotGroup { justify-content: flex-end; }
-.lx-gapind { --lx-k: 0; --lx-w: 3.6em; position: relative; display: block; width: var(--lx-w); height: 0.2em; }
-.lx-bar { position: absolute; inset: 0; border-radius: 1em; overflow: hidden; background: rgb(var(--lx-idle) / 0.2); }
-.lx-bar > i {
-  position: absolute; inset: 0; border-radius: inherit;
-  background: rgb(var(--lx-hi));
-  transform: translateX(calc((var(--lx-k) - 1) * 100%));
+.row.lx-gap.act { opacity: 1; transition: opacity 0.3s var(--lx-ease-blur); }
+.dotGroup {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center;
+  gap: 0.26em;                             /* 0.6 x the dot */
+  height: 1.5em;                           /* 13 dp dot + 16 dp above and below */
+  padding: 0 0.1333em;                     /* 4 dp */
+  transform-origin: 0.1333em 50%;          /* the first dot's edge, inside the 4 dp inset */
 }
-/* The head: a solid dot with its halo painted inside its own box. A box-shadow
-   halo reached past the box of an element whose transform is animated and was cut
-   off square at its layer's edge; and a dot breathing in opacity let the end of the
-   fill show through it. Now only the size breathes and the dot stays opaque. */
-.lx-head {
-  position: absolute; left: -0.7em; top: 50%; width: 1.4em; height: 1.4em; margin-top: -0.7em;
-  transform: translateX(calc(var(--lx-k) * var(--lx-w)));
-  pointer-events: none;
-}
-.lx-head > i {
-  display: block; width: 100%; height: 100%; border-radius: 50%;
-  background: radial-gradient(closest-side,
-    rgb(var(--lx-hi)) 0 25%,
-    rgb(var(--lx-glow) / 0.55) 28.5%,
-    rgb(var(--lx-glow) / 0.22) 50%,
-    rgb(var(--lx-glow) / 0.06) 75%,
-    rgb(var(--lx-glow) / 0) 100%);
-  transform: scale(0.85);
-  animation: lx-breathe 1.9s ease-in-out infinite;
-}
-.row.lx-gap:not(.act) .lx-head > i { animation: none; }
-@keyframes lx-breathe {
-  0%, 100% { transform: scale(0.7); }
-  45% { transform: scale(1.25); }
+.dotGroup > i {
+  display: block; flex: none;
+  width: 0.4333em; height: 0.4333em;       /* 13 dp */
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.35;
 }
 
-/* click-to-seek hosts: a hovered line comes forward (rows themselves stay opaque) */
-body.interactive .row.lyric:not(.act):hover { opacity: 1; }
-body.interactive .row.lyric:not(.act):hover .line { opacity: 0.85; filter: blur(0em); }
-
-/* ---------------- style: punch ----------------
-   Bold caps, sung text in the cover's accent colour, hard-edged sweep, no blur. */
-.lx-style-punch {
-  --lx-hi: var(--accent-text, 255 214 120);
-  --lx-glow: var(--accent-text, 255 214 120);
-  --lx-lo: 0.3;
-  --lx-near: 0.36;
-  --lx-far: 0.1;
-  --lx-sung: 0.7;
-  --lx-blur: 0em;
-  --lx-shrink: 0.1;
-}
-.lx-style-punch .line { text-transform: uppercase; font-weight: 800; letter-spacing: 0.012em; line-height: 1.16; }
-.lx-style-punch .line.lx-sub { font-weight: 700; }
-
-/* ---------------- style: mist ----------------
-   Lighter type, a long wash for the sweep, lines hardly change size. */
-.lx-style-mist {
-  --lx-lo: 0.26;
-  --lx-near: 0.42;
-  --lx-far: 0.12;
-  --lx-sung: 0.9;
-  --lx-blur: 0.06em;
-  --lx-shrink: 0;
-}
-.lx-style-mist .line { font-weight: 500; letter-spacing: 0.004em; line-height: 1.32; }
-.lx-style-mist .line.lx-sub { font-weight: 400; }
+/* click-to-seek hosts: a hovered line comes forward */
+body.interactive .row.lyric:not(.act):hover { opacity: 0.85; filter: none; }

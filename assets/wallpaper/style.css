@@ -154,15 +154,18 @@ body.nodur .progress { display: none; }
   min-width: 0;
   overflow: hidden;
   font-size: var(--fs);
+  /* Reach past the text by the width of a glow, so the edge doesn't cut glows off
+     (#lyricsContent insets the lines by the phone's 24 dp). */
+  margin-inline: -0.55em;
   /* Fully clear bands at both edges: a line scrolled just past the edge must not
      leave its descenders peeking in through a barely-opaque mask. */
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 3%, #000 14%, #000 80%, transparent 97%);
 }
-#lyricsContent { position: absolute; left: 0; right: 0; top: 0; padding: 0 0.25em; will-change: transform; }
+#lyricsContent { position: absolute; left: 0; right: 0; top: 0; padding: 0 0.8em; will-change: transform; }
 
 /* waiting on lyrics */
 #loader {
-  position: absolute; left: 0.25em; top: 45%;
+  position: absolute; left: 0.8em; top: 45%;
   display: flex; gap: 0.3em;
   opacity: 0; transition: opacity 0.4s ease;
 }
@@ -190,8 +193,11 @@ body[data-layout="lock"] #lyrics {
   height: auto;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 5%, #000 18%, #000 78%, transparent 96%);
 }
-body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.line, .row.opp .line) { justify-content: center; text-align: center; }
-body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.dotGroup, .row.opp .dotGroup) { justify-content: center; }
+body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.line, .row.opp .line) { text-align: center; }
+body:is([data-layout="lock"], [data-layout="karaoke"]) .dotGroup { justify-content: center; }
+/* Centred lines grow from their middle (a line-timed line, the interlude dots). */
+body:is([data-layout="lock"], [data-layout="karaoke"]) :is(.lx-whole, .row.opp .lx-whole) { margin-inline: auto; transform-origin: 50% calc(50% - 0.16em); }
+body:is([data-layout="lock"], [data-layout="karaoke"]) .dotGroup { transform-origin: 50% 50%; }
 body:is([data-layout="lock"], [data-layout="karaoke"]) #loader { left: 50%; transform: translateX(-50%); }
 
 /* The card as a one-row strip: small cover, title/artist and the progress bar. */
@@ -236,7 +242,7 @@ body[data-layout="karaoke"] #lyrics {
 }
 body[data-layout="karaoke"] .row.lyric {
   transform: scale(0.7);
-  transition: opacity 0.25s cubic-bezier(0.61, 1, 0.88, 1), transform 0.55s cubic-bezier(0.34, 1.25, 0.64, 1);
+  transition: opacity 0.2s var(--lx-ease-line), filter 0.3s var(--lx-ease-blur), transform 0.55s cubic-bezier(0.34, 1.25, 0.64, 1);
 }
 body[data-layout="karaoke"] .row.lyric.act { transform: none; }
 body[data-layout="karaoke"] .row.lyric.sung { opacity: 0.3; }
@@ -306,7 +312,6 @@ body.interactive .coverWrap,
 body.interactive .progress,
 body.interactive .row.lyric { cursor: pointer; }
 body.interactive .progress { padding-block: 0.6vh; margin-block: -0.6vh; }
-body.interactive .row.lyric:not(.act):hover { opacity: 0.78; }
 .tapped { animation: tapped 0.35s ease; }
 @keyframes tapped { 40% { transform: scale(0.94); } }
 .row.tapped { animation: rowTapped 0.45s ease; }

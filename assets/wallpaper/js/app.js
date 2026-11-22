@@ -16,7 +16,6 @@ const settings = {
   lyricssize: 100,
   linepos: 45,
   lineblur: true,
-  lyricstyle: "glide",   // preset from js/lyric-styles.js: glide | punch | mist
   clock: true,
   offset: 0,
   port: "9012",
@@ -72,7 +71,7 @@ function applySettings() {
     speed: settings.dynspeed / 100,
     audioReactive: settings.audioreactive,
   });
-  LyricsView.setOptions({ blur: settings.lineblur, linePos: settings.linepos / 100, style: settings.lyricstyle });
+  LyricsView.setOptions({ blur: settings.lineblur, linePos: settings.linepos / 100 });
 }
 
 // The desktop host calls this when the page's monitor is fully covered by another

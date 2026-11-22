@@ -1,20 +1,27 @@
-// The lyric engine: turns a lyrics payload into rows and animates them against the
-// playback position. The look and feel come from a preset in lyric-styles.js and from
-// lyrics.css; this file holds no styling numbers of its own.
+// The lyric renderer: a port of the Android app's (github.com/kamol1dn/syllable-lyrics,
+// ui/LyricMotion.kt and ui/LyricsView.kt), so the wallpaper moves exactly as the phone does.
 //
-// How it works
-//  - Every animated value is a pure function of the song position. Nothing is
-//    integrated frame to frame except the scroll, so seeking, pausing and looping
-//    need no special cases: the frame after a seek simply draws the new moment.
-//  - A frame only touches the rows that are being sung (a handful of elements) and
-//    writes a style only when its value changed. Geometry is read in one pass when
-//    the size or the text changes (measure()), never while animating.
-//  - Rows keep the class names the page layouts and the click handling rely on:
-//      .row.lyric[data-start]  one lyric line (plus .opp for the second singer)
-//        .line                 the main text      .line.lx-sub   a background vocal
-//      .row.lx-gap > .dotGroup instrumental break indicator
-//    with .act while a row is being sung and .sung afterwards. Everything below
-//    .line is private to this renderer (.lx-w word, .lx-u timed unit, .lx-c letter).
+//  - Every sung word, held letter and interlude dot has a target that follows how far
+//    through it the song is (a natural cubic spline over its own progress) and a damped
+//    spring that chases the target, stepped exactly for the frame time.
+//  - Sung text is white at LIT, text still to come at UNLIT, with a soft edge FADE wide
+//    between them; whole lines sit at LINE_SUNG / LINE_NOT_SUNG on top of that, and blur
+//    with their distance from the current line.
+//  - Scrolling is a kick: the list jumps to the new line at once, every row is drawn where
+//    it was and springs back, each a little after the row above, so the lyrics move as a
+//    soft wave.
+//  - Line-timed lines are not split into guessed words: the whole line grows a little and
+//    fills from top to bottom over its length. Long instrumental gaps show three dots.
+//
+// Numbers in dp/sp in the Kotlin code are converted with the phone's 30 sp text size as
+// 1 em, so everything scales with the wallpaper's lyric size.
+//
+// Rows keep the class names the page layouts and the click handling rely on:
+//   .row.lyric[data-start]  one lyric line (plus .opp for the second singer)
+//     .line                 the main text      .line.lx-sub   background vocals
+//   .row.lx-gap > .dotGroup instrumental break
+// with .act while a row is current and .sung once it has been sung. Everything else
+// (.lx-g word group, .lx-u syllable, .lx-c letter of a held word) is private.
 "use strict";
 
 const LyricsView = (() => {
@@ -22,432 +29,695 @@ const LyricsView = (() => {
   const content = document.getElementById("lyricsContent");
   host.classList.add("lx");
 
-  const opts = { blur: true, linePos: 0.45 };
-  let style = null;      // preset from LyricStyles
-  let moves = true;      // the preset moves ordinary units at all
-  let source = null;     // payload on screen
-  let rows = [];         // gap and lyric rows, in time order
-  const live = new Set(); // rows carrying inline animation state
+  // ---------------- LyricMotion.kt ----------------
+  const LIT = 0.85, UNLIT = 0.35;          // sung / still to come, as white at this alpha
+  const LINE_NOT_SUNG = 0.51, LINE_SUNG = 0.497;
+  const FADE = 0.2;                         // soft edge, share of the word (or of the line's height)
+  const EMPHASIS_MS = 1000;                 // a syllable held this long is drawn letter by letter
+  const EMPHASIS_TAIL_MS = 250;             // its letters finish this long before it does
+  const INTERLUDE_MS = 3000;                // a gap this long between lines shows dots
+  const DOTS_END_EARLY_MS = 550, DOTS_HIDE_EARLY_MS = 500;
+  const REST_SCALE = 0.95, REST_LIFT = 0.01;
+  const SUNG_LETTER_GLOW = 0.2;
+  const SETTLE_MS = 900;                    // a finished line keeps animating this long
+  const STAGGER_S = 0.042, KICK_LIFETIME_S = 2.5;
+  const DP = 1 / 30;                        // em per dp/sp (the phone's lyrics are 30 sp)
 
-  let started = -1;      // last row whose start has passed
-  let focus = -1;        // row the list is centred on
-  let visLo = 0, visHi = -1; // rows currently allowed to paint
-  let openGap = null;    // gap row that is unfolded
-  let lastT = 0;
+  /** Natural cubic spline through a few points, read between its first and last x. */
+  function spline(points) {
+    const xs = points.map((p) => p[0]), ys = points.map((p) => p[1]), n = xs.length;
+    const m = new Float64Array(n);
+    if (n > 2) {
+      const c = new Float64Array(n), d = new Float64Array(n);
+      for (let i = 1; i < n - 1; i++) {
+        const h0 = xs[i] - xs[i - 1], h1 = xs[i + 1] - xs[i];
+        const diag = 2 * (h0 + h1) - h0 * c[i - 1];
+        const rhs = 6 * ((ys[i + 1] - ys[i]) / h1 - (ys[i] - ys[i - 1]) / h0);
+        c[i] = h1 / diag;
+        d[i] = (rhs - h0 * d[i - 1]) / diag;
+      }
+      for (let i = n - 2; i >= 1; i--) m[i] = d[i] - c[i] * m[i + 1];
+    }
+    return (x) => {
+      const t = Math.min(xs[n - 1], Math.max(xs[0], x));
+      let i = 0;
+      while (i < n - 2 && t > xs[i + 1]) i++;
+      const h = xs[i + 1] - xs[i], a = (xs[i + 1] - t) / h, b = (t - xs[i]) / h;
+      return a * ys[i] + b * ys[i + 1] + ((a * a * a - a) * m[i] + (b * b * b - b) * m[i + 1]) * h * h / 6;
+    };
+  }
 
-  let dirty = true;      // geometry is stale
-  const geo = { hostH: 0, gapH: 0, span: 12 };
-  let y = 0, yLag = 0, yDrawn = NaN, snap = true;
+  /** A damped spring, stepped exactly for any frame time. `hz` is its natural frequency. */
+  class Spring {
+    constructor(start, hz, damping) {
+      this.w = hz * 2 * Math.PI;
+      this.damping = damping;
+      this.velocity = 0;
+      this.value = start;
+      this.goal = start;
+    }
+    snap(to) { this.value = to; this.goal = to; this.velocity = 0; }
+    step(dt) {
+      if (dt <= 0) return this.value;
+      const w = this.w, z = this.damping, o = this.value - this.goal;
+      if (z >= 1) {
+        const e = Math.exp(-w * dt), k = this.velocity + w * o;
+        this.value = this.goal + (o + k * dt) * e;
+        this.velocity = (this.velocity - k * w * dt) * e;
+      } else {
+        const wd = w * Math.sqrt(1 - z * z), e = Math.exp(-z * w * dt);
+        const c = Math.cos(wd * dt), s = Math.sin(wd * dt);
+        const k = (this.velocity + z * w * o) / wd;
+        this.value = this.goal + e * (o * c + k * s);
+        this.velocity = e * (this.velocity * c - (o * wd + z * w * k) * s);
+      }
+      return this.value;
+    }
+  }
 
-  // ---------------- curves ----------------
-  const unit01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
-  const ease = (x) => x * x * (3 - 2 * x);                 // slow in, slow out
-  const settle = (x) => 1 - (1 - x) * (1 - x) * (1 - x);   // fast in, slow out
-  const overshoot = (x) => settle(x) + 1.6 * x * (1 - x) * (1 - x); // passes 1, comes back
-  const CURVES = { soft: settle, snap: overshoot };
+  const WordScale = spline([[0, 0.95], [0.7, 1.0505], [1, 1]]);
+  const WordLift = spline([[0, 0.01], [0.9, -1 / 60], [1, 0]]);
+  const WordGlow = spline([[0, 0], [0.15, 1], [0.6, 1], [1, 0]]);
+  const LetterScale = spline([[0, 0.95], [0.7, 1.175], [1, 1]]);
+  const LetterLift = spline([[0, 0.01], [0.9, -1 / 56], [1, 0]]);
+  const DotScale = spline([[0, 0.75], [0.7, 1.05], [1, 1]]);
+  const DotLift = spline([[0, 0], [0.9, -0.12], [1, 0]]);
+  const DotOpacity = spline([[0, 0.35], [0.6, 1], [1, 1]]);
+
+  const progress = (p, start, end) => (p <= start ? 0 : p >= end ? 1 : (p - start) / (end - start));
+  const fillAt = (pct) => -FADE + (1 + FADE) * pct;
+
+  /** One word or syllable: swells, lifts, glows through the middle, fills left to right. */
+  class WordMotion {
+    constructor(start, end) {
+      this.start = start; this.end = end;
+      this.scale = new Spring(REST_SCALE, 0.88, 0.64);
+      this.lift = new Spring(REST_LIFT, 1.45, 0.4);
+      this.glow = new Spring(0, 1.18, 0.56);
+      this.fill = -FADE;
+      this.fresh = true;
+    }
+    step(p, dt) {
+      const pct = progress(p, this.start, this.end), sung = p >= this.end;
+      this.fill = fillAt(pct);
+      this.scale.goal = sung ? 1 : WordScale(pct);
+      this.lift.goal = sung ? 0 : WordLift(pct);
+      this.glow.goal = sung ? 0 : WordGlow(pct);
+      if (this.fresh) {
+        // First frame on screen: a word already sung starts at rest instead of springing up.
+        if (sung) { this.scale.snap(1); this.lift.snap(0); this.glow.snap(0); }
+        this.fresh = false;
+      } else {
+        this.scale.step(dt); this.lift.step(dt); this.glow.step(dt);
+      }
+    }
+  }
+
+  /** The letters of a held word: the one being sung swells, lifts and glows, its neighbours lean in. */
+  class LetterMotion {
+    constructor(start, end, count) {
+      this.start = start; this.count = count; this.wordEnd = end;
+      this.lettersEnd = Math.max(start + count, end - EMPHASIS_TAIL_MS);
+      this.scale = Array.from({ length: count }, () => new Spring(REST_SCALE, 0.88, 0.64));
+      this.lift = Array.from({ length: count }, () => new Spring(REST_LIFT, 1.45, 0.4));
+      this.glow = Array.from({ length: count }, () => new Spring(0, 1.18, 0.56));
+      this.fill = new Float64Array(count).fill(-FADE);
+      this.fresh = true;
+    }
+    letterStart(i) { return this.start + Math.floor(((this.lettersEnd - this.start) * i) / this.count); }
+    step(p, dt) {
+      const n = this.count, wordSung = p >= this.wordEnd, wordActive = p > this.start && !wordSung;
+      let active = -1, activePct = 0;
+      if (wordActive) {
+        for (let i = 0; i < n; i++) {
+          const s = this.letterStart(i), e = this.letterStart(i + 1);
+          if (p >= s && p < e) { active = i; activePct = progress(p, s, e); break; }
+        }
+      }
+      const first = this.fresh;
+      for (let i = 0; i < n; i++) {
+        const letterSung = p >= this.letterStart(i + 1), letterWaiting = p < this.letterStart(i);
+        let scale = REST_SCALE, lift = REST_LIFT, glow = 0;
+        if (wordSung) { scale = 1; lift = 0; }
+        else if (!wordActive || letterWaiting) { /* at rest */ }
+        else if (active !== -1) {
+          const d = Math.abs(i - active), near = 1 / (1 + Math.pow(d, 2.8));
+          scale = REST_SCALE + (LetterScale(activePct) - REST_SCALE) * near;
+          lift = REST_LIFT + (LetterLift(activePct) - REST_LIFT) * near;
+          glow = WordGlow(activePct) / (1 + d * 0.9);
+        } else if (letterSung) glow = WordGlow(SUNG_LETTER_GLOW);
+        this.fill[i] = wordSung || letterSung ? 1 : i === active ? fillAt(Math.sin((activePct * Math.PI) / 2)) : -FADE;
+        this.scale[i].goal = scale; this.lift[i].goal = lift; this.glow[i].goal = glow;
+        if (first) {
+          if (wordSung) { this.scale[i].snap(1); this.lift[i].snap(0); this.glow[i].snap(0); }
+        } else {
+          this.scale[i].step(dt); this.lift[i].step(dt); this.glow[i].step(dt);
+        }
+      }
+      this.fresh = false;
+    }
+  }
+
+  /** One of the three interlude dots: it pops up and brightens during its third of the gap. */
+  class DotMotion {
+    constructor(start, end) {
+      this.start = start; this.end = end;
+      this.scale = new Spring(DotScale(0), 0.7, 0.6);
+      this.lift = new Spring(0, 1.25, 0.4);
+      this.opacity = new Spring(DotOpacity(0), 1, 0.5);
+      this.fresh = true;
+    }
+    step(p, dt) {
+      const pct = progress(p, this.start, this.end);
+      this.scale.goal = DotScale(pct); this.lift.goal = DotLift(pct); this.opacity.goal = DotOpacity(pct);
+      if (this.fresh) {
+        if (pct >= 1) { this.scale.snap(1); this.lift.snap(0); this.opacity.snap(1); }
+        this.fresh = false;
+      } else {
+        this.scale.step(dt); this.lift.step(dt); this.opacity.step(dt);
+      }
+    }
+  }
+
+  /** The dot group's size as it leaves, t 0..1: a small swell, then down to nothing. */
+  function dotsExitScale(t) {
+    const x = Math.min(1, Math.max(0, t)), swell = 0.19, turn = 0.56;
+    return x < turn ? 1 + swell * Math.sin(((x / turn) * Math.PI) / 2) : (1 + swell) * (1 - Math.pow((x - turn) / (1 - turn), 2));
+  }
+
+  /** Sung part at LIT, the rest at UNLIT, a soft edge at `fill` (0..1 across the text), as gradient stops. */
+  function fillStops(fill) {
+    if (fill >= 1) return [0, 0.0005, LIT, LIT];
+    if (fill <= -FADE) return [0, 0.0005, UNLIT, UNLIT];
+    const tone = (t) => LIT + (UNLIT - LIT) * Math.min(1, Math.max(0, t));
+    const a = Math.min(0.999, Math.max(0, fill));
+    const b = Math.max(a + 0.0005, Math.min(fill + FADE, 1));
+    return [a, b, tone(-fill / FADE), tone((1 - fill) / FADE)];
+  }
 
   // ---------------- text ----------------
   const RTL = /[֐-ࣿיִ-﷿ﹰ-ﻼ]/;
-  // Scripts whose letters stand alone, so a word can be split into letter boxes
-  // without breaking joins or ligatures.
-  const SPLITTABLE = /^[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{N}\p{P}\s]+$/u;
   const CJK = /[぀-ヿ㐀-鿿豈-﫿가-힯]/;
+  const graphemes = (() => {
+    const seg = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+    return (text) => (seg ? Array.from(seg.segment(text), (s) => s.segment) : Array.from(text));
+  })();
 
-  // Untimed text -> words. CJK has no spaces, so each character is its own word and
-  // long lines can still wrap.
-  function splitWords(text) {
+  /** Timed syllables -> words, each keeping its trailing space, as the phone's LyricWord does. */
+  function wordsFromSylls(sylls) {
     const out = [];
-    for (const chunk of text.trim().split(/\s+/)) {
-      if (!chunk) continue;
-      if (!CJK.test(chunk)) { out.push({ text: chunk, space: true }); continue; }
-      const parts = chunk.match(/[぀-ヿ㐀-鿿豈-﫿가-힯][、。，．！？!?,.」』）)]*|[^぀-ヿ㐀-鿿豈-﫿가-힯]+/g) || [chunk];
-      parts.forEach((p, i) => out.push({ text: p, space: i === parts.length - 1 }));
-    }
+    sylls.forEach((s, i) => {
+      let text = String(s.Text ?? "");
+      if (i === sylls.length - 1) text = text.replace(/\s+$/, ""); // the last one never carries a space
+      else if (!s.PartOfWord && !/\s$/.test(text)) text += " ";
+      if (!text) return;
+      out.push({ text, start: s.Start, end: Math.max(s.End, s.Start + 1), joined: !!s.PartOfWord });
+    });
     return out;
   }
 
-  // Timed syllables -> words of units. A syllable flagged PartOfWord continues into
-  // the next one.
-  function wordsFromSylls(sylls) {
-    const words = [];
-    let word = [];
-    for (const s of sylls) {
-      const text = String(s.Text || "").replace(/\s+$/, "");
-      if (text) word.push({ start: s.Start, end: Math.max(s.End, s.Start + 1), text, synth: false });
-      if (!s.PartOfWord && word.length) { words.push({ units: word, space: true }); word = []; }
-    }
-    if (word.length) words.push({ units: word, space: true });
-    return words;
-  }
-
-  // No word timing: sweep across the line evenly, by length, so it fills as it is
-  // sung instead of lighting all at once. A line-synced line usually runs until the
-  // next one starts, through any instrumental after it, so the sweep is held to a singing pace
-  // (`msPerChar`) rather than stretched over a long instrumental tail.
-  const SWEEP_MS_PER_CHAR = 170;
-  function wordsEven(text, start, end, msPerChar) {
-    const parts = splitWords(text);
-    const chars = parts.reduce((n, p) => n + p.text.length, 0) || 1;
-    if (msPerChar) end = Math.min(end, start + Math.max(1200, chars * msPerChar));
-    let at = start;
-    return parts.map((p) => {
-      const d = ((end - start) * p.text.length) / chars;
-      const u = { start: at, end: at + Math.max(1, d), text: p.text, synth: true };
-      at += d;
-      return { units: [u], space: p.space };
+  /** Joins the syllables of one word so a line only wraps between words; CJK stands alone. */
+  function wordGroups(ws) {
+    const groups = [];
+    let cur = [];
+    ws.forEach((w, i) => {
+      cur.push(w);
+      const last = w.text.slice(-1), next = ws[i + 1] ? ws[i + 1].text.charAt(0) : "";
+      const boundary = !w.joined || !last || /\s/.test(last) || CJK.test(last) || !next || /\s/.test(next) || CJK.test(next);
+      if (boundary) { groups.push(cur); cur = []; }
     });
+    if (cur.length) groups.push(cur);
+    return groups;
   }
 
-  // ---------------- building ----------------
-  const el = (tag, cls) => { const e = document.createElement(tag); e.className = cls; return e; };
+  // ---------------- building (LyricsView.kt buildRows) ----------------
+  const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
 
-  function holdStrength(u) {
-    const h = style.hold, dur = u.end - u.start;
-    if (u.synth || dur < h.minMs) return 0;
-    const n = Array.from(u.text).length;
-    if (n < 1 || n > h.maxChars || !SPLITTABLE.test(u.text)) return 0;
-    return 0.4 + 0.6 * ease(unit01((dur - h.minMs) / Math.max(1, h.fullMs - h.minMs)));
-  }
+  let source = null;
+  let rows = [];          // lines and gaps, in time order; plus `creditsStart`, when the last line hands over
+  let creditsStart = Infinity;
+  const opts = { blur: true, linePos: 0.45 };
 
-  function buildLine(words, cls, text, sink) {
+  function buildFlow(words, cls, rtl) {
     const line = el("div", cls);
-    if (RTL.test(text)) line.dir = "rtl";
-    words.forEach((w, wi) => {
-      const wEl = el("span", "lx-w");
-      for (const u of w.units) {
-        const uEl = el("span", "lx-u");
-        u.hold = holdStrength(u);
-        u.chars = null;
-        if (u.hold > 0) {
-          uEl.classList.add("lx-held");
-          const letters = Array.from(u.text), n = letters.length, dur = u.end - u.start;
-          u.chars = letters.map((ch, i) => {
+    if (rtl) line.dir = "rtl";
+    const units = [];
+    for (const g of wordGroups(words)) {
+      const gEl = el("span", "lx-g");
+      for (const w of g) {
+        const body = w.text.replace(/\s+$/, ""), space = w.text.slice(body.length);
+        const held = w.end - w.start >= EMPHASIS_MS && !RTL.test(w.text) && body.length > 0;
+        const u = { start: w.start, end: w.end, el: el("span", "lx-u"), letters: null, motion: null, letterMotion: null, w: {} };
+        if (held) {
+          u.el.classList.add("lx-held");
+          u.letters = graphemes(body).map((ch) => {
             const c = el("span", "lx-c");
             c.textContent = ch;
-            uEl.appendChild(c);
-            return { el: c, start: u.start + (dur * i) / n, len: dur / n, off: i - (n - 1) / 2, k: -1, e: -1 };
+            c.dataset.t = ch;
+            u.el.appendChild(c);
+            return { el: c, w: {} };
           });
+          if (space) u.el.appendChild(document.createTextNode(space));
         } else {
-          uEl.textContent = u.text;
+          u.el.textContent = w.text;
+          u.el.dataset.t = w.text;
         }
-        u.el = uEl; u.k = -1; u.e = -1;
-        sink.push(u);
-        wEl.appendChild(uEl);
+        gEl.appendChild(u.el);
+        units.push(u);
       }
-      line.appendChild(wEl);
-      if (w.space && wi < words.length - 1) line.appendChild(document.createTextNode(" "));
-    });
-    return line;
+      line.appendChild(gEl);
+    }
+    return { el: line, units };
   }
 
   function build() {
     content.textContent = "";
-    rows = []; live.clear();
-    started = -1; focus = -1; visLo = 0; visHi = -1; openGap = null;
-    dirty = true; snap = true;
+    rows = []; creditsStart = Infinity;
+    resetView();
     const src = source;
     if (!src || !Array.isArray(src.Lines) || !src.Lines.length) return;
 
-    const lines = src.Lines.slice().sort((a, b) => a.Start - b.Start);
-    const lyricRows = lines.map((l) => {
-      const row = { gap: false, start: l.Start, end: Math.max(l.End, l.Start + 1), opp: !!l.Opposite, units: [], el: null, top: 0, h: 0, st: 0, d: -1, rtl: false };
+    const lines = src.Lines.slice().sort((a, b) => a.Start - b.Start).map((l) => {
+      const words = l.Sylls && l.Sylls.length ? wordsFromSylls(l.Sylls) : null;
       const text = String(l.Text || "");
-      const words = l.Sylls && l.Sylls.length ? wordsFromSylls(l.Sylls) : wordsEven(text, l.Start, row.end, SWEEP_MS_PER_CHAR);
-      row.el = el("div", "row lyric lx-off" + (row.opp ? " opp" : ""));
-      row.el.dataset.start = String(Math.round(l.Start));
-      row.rtl = RTL.test(text);
-      row.el.appendChild(buildLine(words, "line", text, row.units));
-      return row;
+      let end = Math.max(l.End, l.Start + 1);
+      if (words && words.length) end = Math.max(end, words[words.length - 1].end);
+      return { start: l.Start, end, text, words, opp: !!l.Opposite, bg: [], rtl: RTL.test(text) };
     });
-
-    // A background vocal belongs to the line that was last started when it begins.
+    // Background vocals belong to the line they were sung over. The phone keeps them with
+    // their own lead; here they arrive separately, so take the latest line that has started
+    // by the time they end and whose own end covers them (a lead's end includes its
+    // background vocals), else the line last started when they begin.
+    const rawEnd = src.Lines.slice().sort((a, b) => a.Start - b.Start).map((l) => l.End);
     for (const b of (src.Bg || []).slice().sort((a, b2) => a.Start - b2.Start)) {
       let i = 0;
-      while (i + 1 < lyricRows.length && lyricRows[i + 1].start <= b.Start + 1) i++;
-      const row = lyricRows[i], text = String(b.Text || "");
-      const end = Math.max(b.End, b.Start + 1);
-      const words = b.Sylls && b.Sylls.length ? wordsFromSylls(b.Sylls) : wordsEven(text, b.Start, end);
-      row.el.appendChild(buildLine(words, "line lx-sub", text, row.units));
-      row.start = Math.min(row.start, b.Start);
-      row.end = Math.max(row.end, end);
+      while (i + 1 < lines.length && lines[i + 1].start <= b.Start + 1) i++;
+      for (let j = lines.length - 1; j >= 0; j--) {
+        if (lines[j].start <= b.End && rawEnd[j] >= b.End - 50) { if (j >= i && j <= i + 1) i = j; break; }
+      }
+      const words = b.Sylls && b.Sylls.length
+        ? wordsFromSylls(b.Sylls)
+        : [{ text: String(b.Text || ""), start: b.Start, end: Math.max(b.End, b.Start + 1), joined: false }];
+      const l = lines[i];
+      if (l.bg.length && words.length) l.bg[l.bg.length - 1].text = l.bg[l.bg.length - 1].text.replace(/\s*$/, " ");
+      l.bg.push(...words.filter((w) => w.text.trim()));
+      for (const w of words) l.end = Math.max(l.end, w.end);
     }
-    for (const row of lyricRows) for (const u of row.units) row.end = Math.max(row.end, u.end);
 
-    // Instrumental breaks: before the first line and between lines.
-    const g = style.gap;
-    const gapRow = (from, to, next) => {
-      const row = { gap: true, start: from, end: to, opp: next.opp, units: null, el: null, top: 0, h: 0, st: 0, d: -1, ind: null, k: -1 };
-      row.el = el("div", "row lx-gap lx-off" + (next.opp ? " opp" : ""));
-      const group = el("div", "dotGroup");
-      row.ind = el("span", "lx-gapind");
-      row.ind.innerHTML = '<span class="lx-bar"><i></i></span><span class="lx-head"><i></i></span>';
-      group.appendChild(row.ind);
-      row.el.appendChild(group);
-      return row;
+    // When a line stops being sung. A line-timed line usually runs to the next one; over a
+    // long instrumental that would keep it lit for half a minute, so it gets a reading time.
+    const sungEnd = (l, next) => {
+      if (l.words || !next || l.end < next.start) return l.end;
+      const reading = l.start + Math.max(7000, l.text.length * 110);
+      return next.start - reading >= INTERLUDE_MS ? reading : l.end;
     };
-    let prevEnd = 0;
-    lyricRows.forEach((row, i) => {
-      const from = i === 0 ? 0 : prevEnd + 250;
-      if (row.start - from >= g.minMs) rows.push(gapRow(from, row.start, row));
-      rows.push(row);
-      prevEnd = Math.max(prevEnd, row.end);
+
+    if (lines[0].start >= INTERLUDE_MS) rows.push(gapRow(0, lines[0].start));
+    lines.forEach((l, i) => {
+      const next = lines[i + 1], end = sungEnd(l, next);
+      rows.push(lineRow(l, end));
+      if (next && next.start - end >= INTERLUDE_MS) rows.push(gapRow(end, next.start));
     });
+    creditsStart = Math.max(...lines.map((l) => l.end), lines[lines.length - 1].start) + 1500;
 
-    // Rank among lyric lines, for "how many lines away"; a gap row shares the rank
-    // of the line that follows it.
-    let ord = 0;
-    rows.forEach((r, i) => { r.index = i; r.ord = ord; if (!r.gap) ord++; });
-
+    rows.forEach((r, i) => { r.index = i; });
     const frag = document.createDocumentFragment();
     for (const r of rows) frag.appendChild(r.el);
     content.appendChild(frag);
   }
 
-  // ---------------- geometry ----------------
-  function originOf(node) {
-    const cs = getComputedStyle(node), rtl = cs.direction === "rtl";
-    switch (cs.textAlign) {
-      case "center": case "-webkit-center": return "center";
-      case "right": case "-webkit-right": return "right";
-      case "left": case "-webkit-left": return "left";
-      case "end": return rtl ? "left" : "right";
-      default: return rtl ? "right" : "left";
+  function lineRow(l, end) {
+    const r = {
+      gap: false, start: l.start, end, line: l, el: el("div", "row lyric lx-off" + (l.opp ? " opp" : "")),
+      flows: [], whole: null, leadEnd: l.words && l.words.length ? l.words[l.words.length - 1].end : l.end,
+      bgEnd: l.bg.length ? l.bg[l.bg.length - 1].end : -Infinity,
+      state: "", animated: false, settleUntil: 0, d: -1, top: 0, h: 0, kick: 0,
+    };
+    r.el.dataset.start = String(Math.round(l.start));
+    if (l.words) {
+      const lead = buildFlow(l.words, "line", l.rtl);
+      r.el.appendChild(lead.el);
+      r.flows.push(lead);
+      if (l.bg.length) {
+        const bg = buildFlow(l.bg, "line lx-sub", l.rtl);
+        r.el.appendChild(bg.el);
+        r.flows.push(bg);
+      }
+    } else {
+      // Line timing only: nothing is guessed about its words.
+      const w = el("div", "line lx-whole");
+      if (l.rtl) w.dir = "rtl";
+      w.textContent = l.text;
+      r.el.appendChild(w);
+      r.whole = { el: w, w: {} };
+      if (l.bg.length) {
+        const bg = buildFlow(l.bg, "line lx-sub", l.rtl);
+        r.el.appendChild(bg.el);
+        r.flows.push(bg);
+      }
+    }
+    return r;
+  }
+
+  function gapRow(start, end) {
+    const r = {
+      gap: true, start, end, el: el("div", "row lx-gap lx-off"), group: el("div", "dotGroup"), dots: [], motions: null,
+      state: "", d: -1, top: 0, h: 0, kick: 0, open: 0, openSpring: null, closing: null, visible: false,
+    };
+    for (let i = 0; i < 3; i++) { const d = el("i", ""); r.group.appendChild(d); r.dots.push({ el: d, w: {} }); }
+    r.el.appendChild(r.group);
+    return r;
+  }
+
+  // ---------------- per-frame painting ----------------
+  // Writes a style only when its rounded value changed.
+  function setVar(o, key, css, v, digits) {
+    const s = v.toFixed(digits);
+    if (o.w[key] === s) return;
+    o.w[key] = s;
+    o.el.style.setProperty(css, s);
+  }
+  function setTransform(o, scale, liftEm) {
+    const s = `translate3d(0, ${liftEm.toFixed(4)}em, 0) scale(${scale.toFixed(4)})`;
+    if (o.w.tf === s) return;
+    o.w.tf = s;
+    o.el.style.transform = s;
+  }
+  function paintFill(o, fill) {
+    const [a, b, c0, c1] = fillStops(fill);
+    setVar(o, "fa", "--lx-fa", a, 4);
+    setVar(o, "fb", "--lx-fb", b, 4);
+    setVar(o, "f0", "--lx-f0", c0, 3);
+    setVar(o, "f1", "--lx-f1", c1, 3);
+  }
+  function clearInline(o) {
+    o.w = {};
+    const st = o.el.style;
+    st.removeProperty("transform");
+    for (const k of ["--lx-fa", "--lx-fb", "--lx-f0", "--lx-f1", "--lx-glow"]) st.removeProperty(k);
+  }
+
+  function paintUnit(u, p, dt) {
+    if (!u.letters) {
+      const m = u.motion || (u.motion = new WordMotion(u.start, u.end));
+      m.step(p, dt);
+      setTransform(u, m.scale.value, m.lift.value);
+      setVar(u, "glow", "--lx-glow", Math.min(1, Math.max(0, m.glow.value * 0.35)), 3);
+      paintFill(u, m.fill);
+      return;
+    }
+    const g = u.motion || (u.motion = new WordMotion(u.start, u.end));
+    const lm = u.letterMotion || (u.letterMotion = new LetterMotion(u.start, u.end, u.letters.length));
+    g.step(p, dt);
+    lm.step(p, dt);
+    setTransform(u, g.scale.value, g.lift.value);
+    u.letters.forEach((c, i) => {
+      setTransform(c, lm.scale[i].value, lm.lift[i].value * 2); // letters lift twice as far
+      setVar(c, "glow", "--lx-glow", Math.min(1, Math.max(0, lm.glow[i].value * 1.85)), 3);
+      paintFill(c, lm.fill[i]);
+    });
+  }
+
+  function restUnit(u) {
+    u.motion = null; u.letterMotion = null;
+    clearInline(u);
+    if (u.letters) for (const c of u.letters) clearInline(c);
+  }
+
+  function setAnimated(r, on) {
+    if (r.animated === on) return;
+    r.animated = on;
+    r.el.classList.toggle("lx-anim", on);
+    if (!on) {
+      for (const f of r.flows) for (const u of f.units) restUnit(u);
+      if (r.whole) clearInline(r.whole);
     }
   }
 
-  // One read pass. Row tops are stored as they are with every gap row folded; the
-  // scroll adds the open one back in itself, so a measurement taken while a gap row
-  // is mid-transition is still right.
-  function measure() {
-    geo.hostH = host.clientHeight;
-    if (!geo.hostH || !rows.length) return;
-    dirty = false;
-    geo.gapH = (parseFloat(getComputedStyle(host).fontSize) || 16) * GAP_EM;
-    let folded = 0, minH = Infinity, plain = null, opp = null;
-    const rtlRows = [];
-    for (const r of rows) {
-      const h = r.el.offsetHeight;
-      r.top = r.el.offsetTop - folded;
-      if (r.gap) { folded += h; continue; }
-      r.h = h;
-      if (h > 0 && h < minH) minH = h;
-      if (r.rtl) rtlRows.push([r, originOf(r.el.firstChild)]);
-      else if (r.opp) { if (!opp) opp = originOf(r.el.firstChild); }
-      else if (!plain) plain = originOf(r.el.firstChild);
+  function paintLine(r, p, dt, isActive) {
+    if (r.whole && isActive) {
+      const pct = Math.min(1, Math.max(0, (p - r.start) / Math.max(1, r.end - r.start)));
+      paintFill(r.whole, pct);
     }
-    // writes, after all reads
-    host.style.setProperty("--lx-ox", plain || "left");
-    host.style.setProperty("--lx-oxo", opp || "right");
-    for (const [r, o] of rtlRows) { r.el.style.setProperty("--lx-ox", o); r.el.style.setProperty("--lx-oxo", o); }
-    geo.span = Math.max(8, Math.min(48, Math.ceil(geo.hostH / (Number.isFinite(minH) ? minH : 40)) + 3));
-    if (focus >= 0) window_(focus);
+    if (!r.animated) return;
+    for (const f of r.flows) for (const u of f.units) paintUnit(u, p, dt);
   }
 
-  // ---------------- focus: dimming by distance + paint culling ----------------
+  // Interlude: shown while current, expanding in on a soft spring and folding away in 400 ms.
+  const GAP_CLOSED_EM = 4 * DP;                       // the spacer an idle gap row leaves
+  const GAP_OPEN_EM = (13 + 2 * 16) * DP;             // dots plus their padding
+  const fastOutSlowIn = bezier(0.4, 0, 0.2, 1);
+
+  function paintGap(r, p, dt, isActive, now) {
+    if (isActive && !r.visible) {
+      r.visible = true;
+      r.closing = null;
+      // From the current size, also when it comes back while still folding away.
+      r.openSpring = new Spring(Math.max(0, r.open), Math.sqrt(200) / (2 * Math.PI), 1);
+      r.openSpring.goal = 1;
+      if (!r.motions) {
+        const dotsEnd = Math.max(r.start + 300, r.end - DOTS_END_EARLY_MS);
+        const third = Math.floor((dotsEnd - r.start) / 3);
+        r.motions = [0, 1, 2].map((i) => new DotMotion(r.start + third * i, i === 2 ? dotsEnd : r.start + third * (i + 1)));
+      }
+    } else if (!isActive && r.visible) {
+      r.visible = false;
+      r.closing = { from: r.open, at: now };
+    }
+    if (r.visible) {
+      r.openSpring.step(dt);
+      r.open = r.openSpring.value;
+    } else if (r.closing) {
+      const k = Math.min(1, (now - r.closing.at) / 400);
+      r.open = r.closing.from * (1 - fastOutSlowIn(k));
+      if (k >= 1) { r.closing = null; r.open = 0; r.openSpring = null; r.motions = null; }
+    }
+    const h = r.visible || r.closing ? GAP_OPEN_EM * Math.max(0, r.open) : 0;
+    // The dots and the 4 dp spacer overlap (siblings in one Box on the phone).
+    const hs = Math.max(r.visible ? 0 : GAP_CLOSED_EM, h);
+    if (r.hs !== hs.toFixed(4)) { r.hs = hs.toFixed(4); r.el.style.height = r.hs + "em"; }
+    if (!r.motions) return;
+    const intro = Math.min(1, Math.max(0, (p - r.start) / 300));
+    const leaving = (p - (r.end - DOTS_HIDE_EARLY_MS)) / 400;
+    const s = leaving > 0 ? dotsExitScale(leaving) : 1 - (1 - intro) * (1 - intro);
+    const gs = `scale(${s.toFixed(4)})`;
+    if (r.gs !== gs) { r.gs = gs; r.group.style.transform = gs; }
+    r.motions.forEach((m, i) => {
+      m.step(p, dt);
+      const d = r.dots[i];
+      setTransform(d, m.scale.value, m.lift.value * 1.3); // the phone lifts dots by 1.3 em
+      setVar(d, "op", "opacity", Math.min(1, Math.max(0, m.opacity.value)), 3);
+    });
+  }
+
+  function closeGap(r) {
+    r.visible = false; r.closing = null; r.open = 0; r.openSpring = null; r.motions = null;
+    r.hs = GAP_CLOSED_EM.toFixed(4);
+    r.el.style.height = r.hs + "em";
+  }
+
+  function bezier(x1, y1, x2, y2) {
+    const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+    const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+    const fx = (t) => ((ax * t + bx) * t + cx) * t, fy = (t) => ((ay * t + by) * t + cy) * t;
+    return (x) => {
+      let t = x;
+      for (let i = 0; i < 8; i++) {
+        const dx = fx(t) - x, d = (3 * ax * t + 2 * bx) * t + cx;
+        if (Math.abs(dx) < 1e-5 || !d) break;
+        t -= dx / d;
+      }
+      return fy(Math.min(1, Math.max(0, t)));
+    };
+  }
+
+  // ---------------- state of each row ----------------
+  function rowClass(r, isActive, isPast) {
+    const st = isActive ? "act" : isPast ? "sung" : "";
+    if (r.state === st) return;
+    r.state = st;
+    r.el.classList.toggle("act", st === "act");
+    r.el.classList.toggle("sung", st === "sung");
+  }
+
+  // Inactive lines blur with distance: min(1.25 dp per line, 6.8 dp), as the phone's
+  // RenderEffect radius (sigma = 0.57735 r + 0.5 px).
   function setDistance(r, d) {
     if (r.d === d) return;
     r.d = d;
-    if (d >= style.focus.reach) r.el.style.removeProperty("--lx-d");
-    else r.el.style.setProperty("--lx-d", d);
+    if (d <= 0) r.el.style.removeProperty("--lx-blur");
+    else {
+      const radiusEm = Math.min(d * 1.25, 6.8) * DP;
+      r.el.style.setProperty("--lx-blur", `calc(${(0.57735 * radiusEm).toFixed(4)}em + 0.5px)`);
+    }
+  }
+
+  // ---------------- scrolling: the kick ----------------
+  let kicks = [];          // { delta, at (s), anchor }
+  let snapping = false;
+  let y = 0, yDrawn = NaN, placed = false, kickedTarget = -2;
+  let dirtyGeo = true;
+  let hostH = 0, emPx = 16;
+  let visLo = 0, visHi = -1;
+
+  function resetView() {
+    kicks = []; placed = false; kickedTarget = -2; yDrawn = NaN;
+    dirtyGeo = true; visLo = 0; visHi = -1;
+  }
+
+  /** Damped spring from 1 to 0 (slightly under-damped, settles in roughly 0.6 s). */
+  function springBack(t) {
+    if (t <= 0) return 1;
+    const z = 0.8, w0 = 10.5, wd = w0 * Math.sqrt(1 - z * z);
+    return Math.exp(-z * w0 * t) * (Math.cos(wd * t) + ((z * w0) / wd) * Math.sin(wd * t));
+  }
+
+  function kickOffset(index, nowS) {
+    let sum = 0;
+    for (const k of kicks) {
+      const delay = Math.min(10, Math.max(0, index - k.anchor + 1)) * STAGGER_S;
+      sum += k.delta * springBack(nowS - k.at - delay);
+    }
+    return sum;
   }
 
   // Rows far outside the view are not painted at all.
-  function window_(f) {
-    const lo = Math.max(0, f - geo.span), hi = Math.min(rows.length - 1, f + geo.span);
+  function windowAround(f) {
+    const span = 24;
+    const lo = Math.max(0, f - span), hi = Math.min(rows.length - 1, f + span);
     for (let i = visLo; i <= visHi; i++) if (i < lo || i > hi) rows[i].el.classList.add("lx-off");
     for (let i = lo; i <= hi; i++) if (i < visLo || i > visHi) rows[i].el.classList.remove("lx-off");
     visLo = lo; visHi = hi;
   }
 
-  function setFocus(f) {
-    const prev = focus;
-    focus = f;
-    const reach = style.focus.reach, pad = reach * 2 + 2, base = rows[f].ord;
-    const lo = Math.max(0, Math.min(prev < 0 ? f : prev, f) - pad);
-    const hi = Math.min(rows.length - 1, Math.max(prev < 0 ? f : prev, f) + pad);
-    for (let i = lo; i <= hi; i++) setDistance(rows[i], Math.min(reach, Math.abs(rows[i].ord - base)));
-    window_(f);
-  }
-
-  // ---------------- per-row animation ----------------
-  function setState(r, st) {
-    if (r.st === st) return;
-    r.st = st;
-    const c = r.el.classList;
-    c.toggle("act", st === 1);
-    c.toggle("sung", st === 2);
-    if (r.gap) openGap = st === 1 ? r : (openGap === r ? null : openGap);
-    if (st === 1) live.add(r);
-  }
-
-  function paintUnit(u, t) {
-    const U = style.unit;
-    if (u.chars) { paintHeld(u, t); return; }
-    const k = Math.round(unit01((t - u.start) / (u.end - u.start)) * 400) / 400;
-    if (k !== u.k) { u.k = k; u.el.style.setProperty("--lx-k", k); }
-    if (!moves) return;
-    let e = 0;
-    if (t >= u.start) e = curve(unit01((t - u.start) / U.attackMs)) * (1 - ease(unit01((t - u.end) / U.releaseMs)));
-    e = Math.round(e * 250) / 250;
-    if (e !== u.e) {
-      u.e = e;
-      // 3D, so the unit is moved by the compositor: a 2D transform re-rasterises the
-      // text, which snaps to whole pixels and makes a 2-3 px lift move in visible
-      // steps. Kept (at 0) until the row retires, so the layer isn't created and
-      // dropped around every word.
-      u.el.style.transform = `translate3d(0, ${(-U.lift * e).toFixed(4)}em, 0) scale(${(1 + U.grow * e).toFixed(4)})`;
+  /** Where the content must sit for row `target` to be at the anchor (sentinel = just past the end). */
+  function placeFor(target) {
+    if (target >= rows.length) {
+      const last = rows[rows.length - 1];
+      return opts.linePos * hostH - (last.el.offsetTop + last.el.offsetHeight);
     }
+    const r = rows[target];
+    // An interlude opens downward after it is placed: centre it on its open height.
+    const h = r.gap ? GAP_OPEN_EM * emPx : r.el.offsetHeight;
+    return opts.linePos * hostH - (r.el.offsetTop + h * 0.5);
   }
 
-  // A held syllable: the sweep walks through its letters, and each letter it has
-  // reached swells, lifts and drifts away from the middle of the word until the
-  // note ends, with a slow waver while it lasts.
-  function paintHeld(u, t) {
-    const H = style.hold, dur = u.end - u.start, s = u.hold;
-    const rise = Math.min(900, Math.max(260, dur * 0.45));
-    const fall = 1 - ease(unit01((t - u.end) / (style.unit.releaseMs * 1.3)));
-    for (const c of u.chars) {
-      const k = Math.round(unit01((t - c.start) / c.len) * 200) / 200;
-      if (k !== c.k) { c.k = k; c.el.style.setProperty("--lx-k", k); }
-      let e = 0;
-      if (t >= c.start) {
-        const a = settle(unit01((t - c.start) / rise));
-        const waver = t < u.end ? 1 + 0.07 * Math.sin((t - c.start) * 0.0105) * a : 1;
-        e = a * fall * waver * s;
-      }
-      e = Math.round(e * 250) / 250;
-      if (e !== c.e) {
-        c.e = e;
-        const st = c.el.style;
-        st.transform = `translate3d(${(c.off * H.spread * e).toFixed(4)}em, ${(-H.lift * e).toFixed(4)}em, 0) scale(${(1 + H.grow * e).toFixed(4)})`;
-        st.setProperty("--lx-g", (H.glow * e).toFixed(3));
-      }
+  function scrollTo(target, nowS) {
+    hostH = host.clientHeight;
+    emPx = parseFloat(getComputedStyle(content).fontSize) || emPx;
+    if (!hostH) return;
+    const next = placeFor(target);
+    if (!placed || Math.abs(next - y) > hostH) {
+      // Not in view (a seek, a new song): jump there without a wave.
+      kicks = [];
+      y = next;
+      placed = true;
+      return;
     }
-  }
-
-  function paintGap(r, t) {
-    const span = Math.max(1, r.end - style.gap.outMs - r.start);
-    const k = Math.round(unit01((t - r.start) / span) * 500) / 500;
-    if (k !== r.k) { r.k = k; r.ind.style.setProperty("--lx-k", k); }
-  }
-
-  // Back to what the row's class says it looks like.
-  function retire(r) {
-    live.delete(r);
-    if (r.gap) return;
-    for (const u of r.units) {
-      if (u.k !== -1) { u.k = -1; u.el.style.removeProperty("--lx-k"); }
-      if (u.e !== -1) { u.e = -1; u.el.style.transform = ""; }
-      if (u.chars) for (const c of u.chars) {
-        if (c.k !== -1) { c.k = -1; c.el.style.removeProperty("--lx-k"); }
-        if (c.e !== -1) { c.e = -1; c.el.style.transform = ""; c.el.style.removeProperty("--lx-g"); }
-      }
-    }
+    const delta = y - next;
+    if (Math.abs(delta) < 1) return;
+    kicks = kicks.filter((k) => nowS - k.at < KICK_LIFETIME_S);
+    kicks.push({ delta, at: nowS, anchor: target });
+    y = next;
   }
 
   // ---------------- frame ----------------
-  const GAP_EM = 1.7;       // unfolded height of an interlude row; lyrics.css reads it as --lx-gap-h
-  const LOOK_BACK = 4;      // rows behind the newest one that can still be mid-line (overlapping singers)
-  let curve = settle;
-  let tail = 400;           // ms a finished row keeps animating (its last unit settling)
-
-  function stateAt(r, t) {
-    if (t < r.start) return 0;
-    if (r.gap) return t < r.end - style.gap.outMs ? 1 : 2;
-    return t < r.end ? 1 : 2;
-  }
-
-  function frame(t, dt) {
+  function frame(p, dt) {
     const n = rows.length;
     if (!n) return;
-    if (dirty) measure();
-    const jumped = Math.abs(t - lastT) > 1200;
-    lastT = t;
+    const nowMs = performance.now(), nowS = nowMs / 1000;
+    // New size or settings: re-place without a wave.
+    if (dirtyGeo) { hostH = host.clientHeight; dirtyGeo = false; placed = false; kickedTarget = -2; }
 
-    // newest row that has started
-    let i = Math.min(started, n - 1);
-    while (i + 1 < n && rows[i + 1].start <= t) i++;
-    while (i >= 0 && rows[i].start > t) i--;
-    const from = Math.max(0, Math.min(i, started) - LOOK_BACK), to = Math.min(n - 1, Math.max(i, started) + 1);
-    started = i;
-    for (let j = from; j <= to; j++) setState(rows[j], stateAt(rows[j], t));
+    // A row is current from its start until the next row starts (the credits take over at the end).
+    let active = -1;
+    for (let i = 0; i < n; i++) { if (rows[i].start <= p) active = i; else break; }
+    if (active === n - 1 && p >= creditsStart) active = n;
+    // Earlier lines whose singing runs on over the current one (overlapping singers, background vocals).
+    const still = new Set();
+    if (active > 0) {
+      for (let i = active - 1; i >= Math.max(0, active - 2); i--) {
+        const r = rows[i];
+        if (!r.gap && r.start <= p && p < Math.max(r.leadEnd, r.bgEnd)) still.add(i);
+      }
+    }
+    // Keep an older line in view while its main vocal is still going.
+    let target = active;
+    for (const i of still) if (rows[i].leadEnd > p && i < target) target = i;
 
-    for (const r of live) {
-      if (t < r.start || t >= r.end + tail) { retire(r); continue; }
-      if (r.gap) paintGap(r, t);
-      else for (const u of r.units) paintUnit(u, t);
+    // A jump (new lyrics, a seek, a new size): rows come into view at their final look,
+    // as the phone's freshly laid out rows do, instead of fading or blurring in.
+    if (snapping) { host.classList.remove("lx-snap"); snapping = false; }
+    const focus = Math.min(Math.max(target, 0), n - 1);
+    let jump = !placed || focus < visLo || focus > visHi;
+    if (!jump && target !== kickedTarget) {
+      // Farther than a screen away: scrollTo will jump there without a wave.
+      hostH = host.clientHeight;
+      jump = Math.abs(placeFor(focus) - y) > hostH;
+    }
+    if (jump) { host.classList.add("lx-snap"); snapping = true; }
+    windowAround(focus);
+
+    const blur = opts.blur;
+    const from = Math.max(0, Math.min(visLo, target) - 1), to = Math.min(n - 1, Math.max(visHi, target) + 1);
+    for (let i = 0; i < n; i++) {
+      const r = rows[i];
+      const isActive = i === active || still.has(i);
+      const isPast = active >= 0 && i < active && !isActive;
+      if (i < from - 2 || i > to + 2) {
+        // Far away: only keep the class right, no animation.
+        rowClass(r, isActive, isPast);
+        if (!r.gap) setAnimated(r, false);
+        else if (!isActive && (r.visible || r.closing)) closeGap(r);
+        continue;
+      }
+      rowClass(r, isActive, isPast);
+      if (r.gap) { paintGap(r, p, dt, isActive, nowMs); continue; }
+      setDistance(r, blur && !isActive ? (active < 0 ? 0 : Math.abs(i - active)) : 0);
+      if (isActive) { r.settleUntil = nowMs + SETTLE_MS; setAnimated(r, true); }
+      else setAnimated(r, isPast && nowMs < r.settleUntil && r.animated);
+      paintLine(r, p, dt, isActive);
     }
 
-    // which row to centre: the newest, a little ahead of time; a folded gap hands over to the next line
-    let f = i;
-    if (f + 1 < n && rows[f + 1].start - style.scroll.leadMs <= t) f++;
-    if (f < 0) f = 0;
-    if (rows[f].gap && rows[f].st !== 1 && t >= rows[f].start && f + 1 < n) f++;
-    if (f !== focus) setFocus(f);
-
-    if (!geo.hostH) return;
-    const r = rows[f];
-    let top = r.top;
-    if (openGap && openGap.index < f) top += geo.gapH;
-    const target = opts.linePos * geo.hostH - (top + (r.gap ? geo.gapH : r.h) * 0.5);
-    if (snap) {
-      y = yLag = target; snap = false;
-    } else {
-      if (jumped && Math.abs(target - y) > geo.hostH * 1.5) {
-        // a long seek: arrive from just outside the view instead of flying past every line
-        y = yLag = target + Math.sign(y - target) * geo.hostH * 0.6;
-      }
-      // two smoothing stages in a row: eases out of rest and into the target, never overshoots
-      const a = 1 - Math.exp(-dt / style.scroll.settle);
-      yLag += (target - yLag) * a;
-      y += (yLag - y) * a;
-      if (Math.abs(target - y) < 0.05) y = yLag = target;
+    if (target !== kickedTarget || !placed) {
+      kickedTarget = target;
+      scrollTo(Math.max(target, 0), nowS);
     }
     if (y !== yDrawn) {
       yDrawn = y;
       content.style.transform = `translate3d(0, ${y.toFixed(2)}px, 0)`;
     }
+
+    // Every row drawn where the kick left it, springing back a little after the row above.
+    kicks = kicks.filter((k) => nowS - k.at < KICK_LIFETIME_S);
+    for (let i = visLo; i <= visHi; i++) {
+      const r = rows[i];
+      const off = kicks.length ? Math.round(kickOffset(i, nowS) * 100) / 100 : 0;
+      if (off !== r.kick) {
+        r.kick = off;
+        if (off) r.el.style.translate = `0 ${off}px`;
+        else r.el.style.removeProperty("translate");
+      }
+    }
   }
 
   // ---------------- options ----------------
-  function useStyle(id) {
-    const next = LyricStyles.get(id);
-    if (style && next.id === style.id) return false;
-    if (style) host.classList.remove("lx-style-" + style.id);
-    style = next;
-    host.classList.add("lx-style-" + style.id);
-    host.dataset.lyricStyle = style.id;
-    moves = style.unit.lift !== 0 || style.unit.grow !== 0;
-    curve = CURVES[style.unit.curve] || settle;
-    tail = Math.max(style.unit.releaseMs * 1.3, 200);
-    const hs = host.style;
-    hs.setProperty("--lx-feather", style.fill.feather + "em");
-    hs.setProperty("--lx-reach", style.focus.reach);
-    hs.setProperty("--lx-gap-h", GAP_EM + "em");
-    for (const k of Object.keys(style.vars)) hs.setProperty(k, style.vars[k]);
-    return true;
-  }
-  useStyle("");
-
   if (typeof ResizeObserver === "function") {
-    const ro = new ResizeObserver(() => { dirty = true; });
-    ro.observe(host);
-    ro.observe(content);
+    new ResizeObserver(() => { dirtyGeo = true; }).observe(host);
   } else {
-    window.addEventListener("resize", () => { dirty = true; });
+    window.addEventListener("resize", () => { dirtyGeo = true; });
   }
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { dirty = true; });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { dirtyGeo = true; });
 
   return {
     set(lyrics) { source = lyrics || null; build(); },
     setOptions(o) {
       if (o.blur !== undefined) { opts.blur = !!o.blur; host.classList.toggle("lx-noblur", !opts.blur); }
       if (o.linePos !== undefined && Number.isFinite(Number(o.linePos))) opts.linePos = Number(o.linePos);
-      if (o.style !== undefined && useStyle(o.style)) build();
-      dirty = true; // the layout may have changed along with the settings
+      dirtyGeo = true; // the layout may have changed along with the settings
     },
     frame,
     get hasLyrics() { return rows.length > 0; },
-    get style() { return style.id; },
+    get style() { return "phone"; },
   };
 })();

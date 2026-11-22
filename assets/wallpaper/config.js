@@ -20,7 +20,6 @@ window.WALLPAPER_CONFIG = {
   lyricssize: 100,       // %
   linepos: 45,           // active line height, % of the screen
   lineblur: true,        // blur lines away from the current one
-  lyricstyle: "glide",   // glide | punch | mist
   offset: 0,             // ms, positive = lyrics earlier
   clock: true,           // clock when nothing is playing
   fps: 60,
