@@ -1,0 +1,160 @@
+/* Look of the lyric renderer (js/lyric-view.js). Loaded after style.css.
+   Selectors here are class-only on purpose, so the page layouts in style.css
+   (body[data-layout=...] rules on .row / .line / .dotGroup) always win over them.
+
+   Numbers the engine animates arrive as custom properties:
+     --lx-k   0..1  how far the sweep has crossed a unit (or an interlude)
+     --lx-g   0..1  halo strength of a held letter
+     --lx-d   lines between a row and the current one (capped at --lx-reach)
+   Everything else below is a knob a style preset may turn (.lx-style-<id>). */
+
+.lx {
+  --lx-hi: 255 255 255;      /* sung text, r g b */
+  --lx-idle: 255 255 255;    /* text of lines that are not being sung */
+  --lx-glow: 255 255 255;    /* halo of held letters */
+  --lx-lo: 0.34;             /* alpha of the not-yet-sung part of the current line */
+  --lx-feather: 0.42em;      /* soft edge of the sweep (set from the preset) */
+  --lx-reach: 5;             /* lines after which distance stops mattering (set from the preset) */
+  --lx-near: 0.5;            /* opacity of the lines right next to the current one */
+  --lx-far: 0.15;            /* opacity at --lx-reach and beyond */
+  --lx-sung: 0.78;           /* extra dimming of lines already sung */
+  --lx-blur: 0.042em;        /* blur added per line of distance */
+  --lx-shrink: 0.04;         /* how much smaller a line is while it is not the current one */
+  --lx-gap-h: 1.7em;         /* height of an unfolded interlude row (set by the engine) */
+  --lx-ox: left;             /* where lines grow from; measured from the layout by the engine */
+  --lx-oxo: right;
+  --lx-ease: cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+.lx.lx-noblur { --lx-blur: 0em; }
+
+/* ---------------- rows ---------------- */
+.row {
+  --lx-d: var(--lx-reach);
+  padding: 0.36em 0;
+  opacity: 1;
+}
+.row.act, .row.sung { opacity: 1; }
+.row.lx-off { visibility: hidden; }
+
+.line {
+  --lx-fade: calc((var(--lx-near) - var(--lx-far)) / max(1, var(--lx-reach) - 1));
+  display: block;
+  font-weight: 700;
+  line-height: 1.26;
+  letter-spacing: -0.012em;
+  opacity: max(var(--lx-far), calc(var(--lx-near) - (var(--lx-d) - 1) * var(--lx-fade)));
+  filter: blur(calc(var(--lx-d) * var(--lx-blur)));
+  transform: scale(calc(1 - var(--lx-shrink)));
+  transform-origin: var(--lx-ox) 50%;
+  transition: opacity 0.5s var(--lx-ease), filter 0.5s var(--lx-ease), transform 0.65s var(--lx-ease);
+}
+.row.opp .line { text-align: end; transform-origin: var(--lx-oxo) 50%; }
+.row.sung .line { opacity: calc(max(var(--lx-far), calc(var(--lx-near) - (var(--lx-d) - 1) * var(--lx-fade))) * var(--lx-sung)); }
+.row.act .line { opacity: 1; filter: blur(0em); transform: none; }
+.lx-noblur .line, .lx-noblur .row.act .line { filter: none; }
+
+/* background vocal: a smaller second line inside the row */
+.line.lx-sub { font-size: 0.58em; font-weight: 600; margin-top: 0.3em; letter-spacing: 0; --lx-lo: 0.28; }
+.row.act .line.lx-sub { opacity: 0.8; }
+
+/* ---------------- words, timed units, letters ---------------- */
+.lx-w { display: inline-block; white-space: nowrap; }
+.lx-u, .lx-c {
+  display: inline-block;
+  /* The glyphs are painted through a clipped background, which stops at the box
+     edge; the box is grown past ascenders/descenders and pulled back with equal
+     negative margins so nothing is cut off and nothing moves. */
+  padding: 0.16em 0.06em 0.32em;
+  margin: -0.16em -0.06em -0.32em;
+  color: rgb(var(--lx-idle));
+  -webkit-text-fill-color: rgb(var(--lx-idle));
+}
+.lx-c { white-space: pre; }
+
+/* Only the row being sung pays for the gradient. */
+.row.act :is(.lx-u, .lx-c) { --lx-k: 0; }
+.row.act :is(.lx-u:not(.lx-held), .lx-c),
+:is(.lx-u:not(.lx-held), .lx-c)[style*="--lx-k"] {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(to right,
+    rgb(var(--lx-hi)) calc(var(--lx-k) * (100% + var(--lx-feather)) - var(--lx-feather)),
+    rgb(var(--lx-hi) / var(--lx-lo)) calc(var(--lx-k) * (100% + var(--lx-feather))));
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.row.act .line[dir="rtl"] :is(.lx-u:not(.lx-held), .lx-c),
+.line[dir="rtl"] :is(.lx-u:not(.lx-held), .lx-c)[style*="--lx-k"] {
+  background-image: linear-gradient(to left,
+    rgb(var(--lx-hi)) calc(var(--lx-k) * (100% + var(--lx-feather)) - var(--lx-feather)),
+    rgb(var(--lx-hi) / var(--lx-lo)) calc(var(--lx-k) * (100% + var(--lx-feather))));
+}
+.lx-c {
+  --lx-g: 0;
+  text-shadow: 0 0 calc(0.12em + var(--lx-g) * 0.5em) rgb(var(--lx-glow) / calc(var(--lx-g) * 0.62));
+}
+
+/* ---------------- interlude ----------------
+   A short track that fills over the break, with a breathing head. The row takes
+   no room until its break is playing. */
+.row.lx-gap {
+  height: 0; padding: 0; opacity: 0;
+  transition: height 0.44s var(--lx-ease), opacity 0.28s linear;
+}
+.row.lx-gap.act { height: var(--lx-gap-h); opacity: 1; }
+.dotGroup { display: flex; align-items: center; gap: 0; height: var(--lx-gap-h); font-size: 1em; line-height: 1; }
+.row.opp .dotGroup { justify-content: flex-end; }
+.lx-gapind { --lx-k: 0; --lx-w: 3.6em; position: relative; display: block; width: var(--lx-w); height: 0.2em; }
+.lx-bar { position: absolute; inset: 0; border-radius: 1em; overflow: hidden; background: rgb(var(--lx-idle) / 0.2); }
+.lx-bar > i {
+  position: absolute; inset: 0; border-radius: inherit;
+  background: rgb(var(--lx-hi));
+  transform: translateX(calc((var(--lx-k) - 1) * 100%));
+}
+.lx-head {
+  position: absolute; left: -0.19em; top: 50%; width: 0.38em; height: 0.38em; margin-top: -0.19em;
+  transform: translateX(calc(var(--lx-k) * var(--lx-w)));
+}
+.lx-head > i {
+  display: block; width: 100%; height: 100%; border-radius: 50%;
+  background: rgb(var(--lx-hi));
+  box-shadow: 0 0 0.5em rgb(var(--lx-glow) / 0.7);
+  animation: lx-breathe 1.9s ease-in-out infinite;
+}
+.row.lx-gap:not(.act) .lx-head > i { animation: none; }
+@keyframes lx-breathe {
+  0%, 100% { transform: scale(0.7); opacity: 0.75; }
+  45% { transform: scale(1.25); opacity: 1; }
+}
+
+/* click-to-seek hosts: a hovered line comes forward (rows themselves stay opaque) */
+body.interactive .row.lyric:not(.act):hover { opacity: 1; }
+body.interactive .row.lyric:not(.act):hover .line { opacity: 0.85; filter: blur(0em); }
+
+/* ---------------- style: punch ----------------
+   Bold caps, sung text in the cover's accent colour, hard-edged sweep, no blur. */
+.lx-style-punch {
+  --lx-hi: var(--accent-text, 255 214 120);
+  --lx-glow: var(--accent-text, 255 214 120);
+  --lx-lo: 0.3;
+  --lx-near: 0.36;
+  --lx-far: 0.1;
+  --lx-sung: 0.7;
+  --lx-blur: 0em;
+  --lx-shrink: 0.1;
+}
+.lx-style-punch .line { text-transform: uppercase; font-weight: 800; letter-spacing: 0.012em; line-height: 1.16; }
+.lx-style-punch .line.lx-sub { font-weight: 700; }
+
+/* ---------------- style: mist ----------------
+   Lighter type, a long wash for the sweep, lines hardly change size. */
+.lx-style-mist {
+  --lx-lo: 0.26;
+  --lx-near: 0.42;
+  --lx-far: 0.12;
+  --lx-sung: 0.9;
+  --lx-blur: 0.06em;
+  --lx-shrink: 0;
+}
+.lx-style-mist .line { font-weight: 500; letter-spacing: 0.004em; line-height: 1.32; }
+.lx-style-mist .line.lx-sub { font-weight: 400; }

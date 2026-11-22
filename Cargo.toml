@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Function names and line numbers go into the separate .pdb (not shipped; keep the one of
+# every released build) so crash dumps can be read. The .exe grows by ~0.5%.
+debug = "line-tables-only"

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lyrics wallpaper (lock screen)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="lyrics.css">
+</head>
+<!-- Lock-screen variant: same code, "lockscreen" overrides from config.js
+     (lyrics centred below Windows' own clock, no clock of ours). -->
+<body class="idle nolyrics" data-bg="dynamic" data-layout="lock">
+  <script>window.WALLPAPER_SURFACE = "lockscreen";</script>
+  <script src="js/shell.js"></script>
+  <script src="config.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/backdrop.js"></script>
+  <script src="js/background.js"></script>
+  <script src="js/lyric-styles.js"></script>
+  <script src="js/lyric-view.js"></script>
+  <script src="js/demo.js"></script>
+  <script src="js/interact.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

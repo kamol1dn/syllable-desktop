@@ -1,0 +1,14 @@
+[package]
+name = "syllable-media"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+syllable-core = { version = "0.1.0", path = "../core" }
+windows = { version = "0.62.2", features = ["Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams"] }
+
+[dev-dependencies]
+# examples/fake_sessions.rs only (resolver 2 keeps these out of the module's own build)
+windows = { version = "0.62.2", features = ["Foundation", "Media", "Media_Control", "Media_Playback", "Storage_Streams", "Win32_System_Com"] }
