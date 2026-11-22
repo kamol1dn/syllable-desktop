@@ -52,9 +52,15 @@ pub fn start(ctx: Context) -> anyhow::Result<()> {
     let quit_tx = tx.clone();
     std::thread::Builder::new().name("media-bus".into()).spawn(move || {
         for ev in events {
-            if matches!(ev, Event::Quit) {
-                let _ = quit_tx.send(Msg::Quit);
-                break;
+            match ev {
+                Event::Quit => {
+                    let _ = quit_tx.send(Msg::Quit);
+                    break;
+                }
+                Event::HiResArtwork { key, bytes } => {
+                    let _ = quit_tx.send(Msg::HiResArt(key, bytes));
+                }
+                _ => {}
             }
         }
     })?;
@@ -101,6 +107,7 @@ fn run(bus: Bus, tx: Sender<Msg>, rx: Receiver<Msg>) -> windows::core::Result<()
                     }
                     Msg::Resubscribe => subs.resubscribe(),
                     Msg::Wake => {}
+                    Msg::HiResArt(key, bytes) => w.hires_artwork(&key, bytes),
                 }
             }
             let left = settle_until.saturating_duration_since(Instant::now());
@@ -122,6 +129,8 @@ struct ArtState {
     hash: Option<u64>,
     since: Instant,
     last_read: Option<Instant>,
+    /// A bigger cover replaced the session's thumbnail for this song: leave it.
+    hires: bool,
 }
 
 struct Watcher {
@@ -164,7 +173,7 @@ impl Watcher {
             held: None,
             playing: false,
             published_playing: None,
-            art: ArtState { key: None, hash: None, since: Instant::now(), last_read: None },
+            art: ArtState { key: None, hash: None, since: Instant::now(), last_read: None, hires: false },
             details: Default::default(),
             details_since: Instant::now(),
         }
@@ -265,7 +274,7 @@ impl Watcher {
         self.held = None;
         position::clear();
         self.observed = None;
-        self.art = ArtState { key: None, hash: None, since: Instant::now(), last_read: None };
+        self.art = ArtState { key: None, hash: None, since: Instant::now(), last_read: None, hires: false };
         self.bus.publish(Event::Artwork(None));
         if self.published_playing == Some(true) {
             self.bus.publish(Event::PlaybackChanged { playing: false });
@@ -326,7 +335,10 @@ impl Watcher {
     fn artwork(&mut self, key: &str, thumb: Option<&windows::Storage::Streams::IRandomAccessStreamReference>) {
         let new_track = self.art.key.as_deref() != Some(key);
         if new_track {
-            self.art = ArtState { key: Some(key.to_string()), hash: None, since: Instant::now(), last_read: None };
+            self.art = ArtState { key: Some(key.to_string()), hash: None, since: Instant::now(), last_read: None, hires: false };
+        }
+        if !new_track && self.art.hires {
+            return;
         }
         let age = self.art.since.elapsed();
         let recheck = age < ART_RECHECK || (self.art.hash.is_none() && age < ART_LATE);
@@ -357,6 +369,19 @@ impl Watcher {
             self.art.hash = hash;
             self.bus.publish(Event::Artwork(bytes.map(Arc::new)));
         }
+    }
+}
+
+impl Watcher {
+    /// Spotify's 640 px cover for the current song: publish it in place of the
+    /// session's thumbnail, which is not read again for this song.
+    fn hires_artwork(&mut self, key: &str, bytes: std::sync::Arc<Vec<u8>>) {
+        if self.art.key.as_deref() != Some(key) {
+            return; // a song that is no longer playing
+        }
+        log!("media: artwork {} bytes (640 px)", bytes.len());
+        self.art.hires = true;
+        self.bus.publish(Event::Artwork(Some(bytes)));
     }
 }
 

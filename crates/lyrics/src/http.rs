@@ -51,6 +51,14 @@ pub fn get(agent: &Agent, url: &str, headers: &[(&str, &str)]) -> anyhow::Result
     finish(req.call())
 }
 
+/// A binary body (an image). Status codes come back as values, as with `get`.
+pub fn get_bytes(agent: &Agent, url: &str, limit: u64) -> anyhow::Result<(u16, Vec<u8>)> {
+    let mut res = agent.get(url).call()?;
+    let status = res.status().as_u16();
+    let body = if (200..300).contains(&status) { res.body_mut().with_config().limit(limit).read_to_vec()? } else { Vec::new() };
+    Ok((status, body))
+}
+
 pub fn post_form(agent: &Agent, url: &str, form: &[(&str, &str)]) -> anyhow::Result<Response> {
     finish(agent.post(url).send_form(form.iter().copied()))
 }

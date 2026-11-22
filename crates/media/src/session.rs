@@ -20,6 +20,8 @@ pub enum Msg {
     Wake,
     /// The set of sessions changed: re-attach handlers, then poll.
     Resubscribe,
+    /// A bigger cover for the song with this key (`Event::HiResArtwork`).
+    HiResArt(String, std::sync::Arc<Vec<u8>>),
     Quit,
 }
 

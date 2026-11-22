@@ -18,6 +18,10 @@ pub enum Event {
     TrackUpdated(Arc<TrackInfo>),
     /// Cover image bytes (PNG/JPEG) for the current song, or `None` when it has none.
     Artwork(Option<Arc<Vec<u8>>>),
+    /// A bigger cover for the song with this `TrackInfo::key()` (Spotify's 640 px art,
+    /// found by `syllable-lyrics`). `syllable-media` republishes it as `Artwork` and
+    /// stops replacing it with the media session's small thumbnail.
+    HiResArtwork { key: String, bytes: Arc<Vec<u8>> },
     /// Lyrics for the current song, or `None` when there are none. Published by
     /// `syllable-lyrics`; may be published again if a better source answers later.
     Lyrics(Option<Arc<Lyrics>>),

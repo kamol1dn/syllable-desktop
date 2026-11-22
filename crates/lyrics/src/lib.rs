@@ -7,6 +7,7 @@
 
 mod accounts;
 pub mod cache;
+mod cover;
 mod http;
 mod lrclib;
 mod musixmatch;
@@ -49,6 +50,7 @@ pub fn start_in(ctx: Context, dir: PathBuf) -> anyhow::Result<()> {
         prefetch_gen: Generation::default(),
         publish: Arc::new(Mutex::new(())),
         config: ctx.config.clone(),
+        cover_ids: cover::Ids::load(dir.join("cache").join("cover-ids.json")),
     });
     std::thread::Builder::new().name("lyrics".into()).spawn(move || service.run(events))?;
     Ok(())
@@ -63,6 +65,8 @@ struct Service {
     /// so a cancelled lookup can never publish after the track changed.
     publish: Arc<Mutex<()>>,
     config: syllable_core::ConfigStore,
+    /// Spotify ids of songs whose cover was looked up, kept across runs.
+    cover_ids: cover::Ids,
 }
 
 /// What the control thread knows about the lookup in flight.
@@ -78,6 +82,28 @@ fn setup(acc: &Accounts) -> (bool, bool, bool) {
 }
 
 impl Service {
+    /// Spotify's 640 px cover for a Spotify song, in place of the media session's small
+    /// thumbnail (see `cover`). Cancelled with the lookup when the song changes.
+    fn spawn_cover(self: &Arc<Self>, info: &Arc<TrackInfo>, token: &http::Token) {
+        if !info.is_spotify {
+            return;
+        }
+        let (me, info, token) = (self.clone(), info.clone(), token.clone());
+        let _ = std::thread::Builder::new().name("lyrics-cover".into()).spawn(move || {
+            match cover::fetch(&me.resolver.acc, &me.cover_ids, &info, &token) {
+                Ok(Some(bytes)) => {
+                    let _g = me.publish.lock().unwrap();
+                    if !token.cancelled() {
+                        me.bus.publish(Event::HiResArtwork { key: info.key(), bytes: Arc::new(bytes) });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) if http::is_cancelled(&e) => {}
+                Err(e) => log!("cover: {e:#}"),
+            }
+        });
+    }
+
     fn run(self: Arc<Self>, events: std::sync::mpsc::Receiver<Event>) {
         log!("lyrics: started (cache in {})", self.resolver.cache_dir_display());
         let mut current: Option<Current> = None;
@@ -140,6 +166,7 @@ impl Service {
         };
         let cur = Current { info: info.clone(), done: Arc::new(AtomicBool::new(false)), found: Arc::new(AtomicBool::new(false)) };
         let (done, found) = (cur.done.clone(), cur.found.clone());
+        self.spawn_cover(&info, &token);
         let me = self.clone();
         std::thread::Builder::new()
             .name("lyrics-resolve".into())
