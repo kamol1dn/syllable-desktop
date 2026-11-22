@@ -53,6 +53,12 @@ const MAX_STALE_MS: f64 = 30.0 * 60_000.0;
 const NEW_TRACK_START_MS: f64 = 5000.0;
 /// For this long after a jump, backward corrections apply at once instead of slewing.
 const SETTLE_MS: f64 = 2000.0;
+/// On pause, a published position closer than this to the clock is taken as the
+/// player's rounding, not a move: Spotify's pause sample is often a second behind
+/// what it was playing (its resume sample agrees with the running clock again), and
+/// applying it pulled the lyrics back, un-singing half a line, then pushed them
+/// forward on resume. Farther than this it is a seek.
+const PAUSE_HOLD_MS: f64 = 1500.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Model {
@@ -163,11 +169,27 @@ impl Clock {
         let estimate = estimate.unwrap();
 
         if s.playing != m.playing {
-            // Pausing: a fresh sample is the exact pause point (taken while stopped, so
-            // `estimate` is already unextrapolated); otherwise freeze where we are.
-            // Resuming: a fresh sample says where it resumed; otherwise carry on.
-            let pos = if fresh { estimate } else { current };
-            return self.set(pos, s.playing, rate, mono);
+            if !s.playing {
+                // Pausing: freeze where we are, unless the player says it stopped
+                // somewhere else entirely (`estimate` is unextrapolated while paused).
+                let pos = if fresh && (estimate - current).abs() > PAUSE_HOLD_MS { estimate } else { current };
+                return self.set(pos, false, rate, mono);
+            }
+            // Resuming: carry on from the pause point, and treat a fresh sample like any
+            // correction while playing (forward at once, a little backward slewed),
+            // since that is where the pause point's error, if any, comes out.
+            self.set(current, true, rate, mono);
+            if !fresh {
+                return Some(Write { position_ms: current, playing: true, rate });
+            }
+            let diff = estimate - current;
+            if diff.abs() < DEADBAND_MS {
+                return Some(Write { position_ms: current, playing: true, rate });
+            }
+            if diff > 0.0 || -diff > MAX_SLEW_MS {
+                return self.set(estimate, true, rate, mono);
+            }
+            return Some(self.start_slew(current, diff, rate, mono));
         }
         if (rate - self.nominal_rate).abs() > 1e-6 {
             let pos = if fresh { estimate } else { current };
@@ -175,8 +197,10 @@ impl Clock {
         }
         if fresh {
             if !s.playing {
-                // Seek while paused.
-                return if (estimate - current).abs() < DEADBAND_MS { None } else { self.set(estimate, false, rate, mono) };
+                // Seek while paused. The pause point often lands a poll after the pause
+                // itself; held to the same tolerance, a small difference waits for the
+                // resume sample to settle it.
+                return if (estimate - current).abs() <= PAUSE_HOLD_MS { None } else { self.set(estimate, false, rate, mono) };
             }
             let diff = estimate - current;
             if diff.abs() < DEADBAND_MS {
@@ -190,12 +214,17 @@ impl Clock {
                 return self.set(estimate, true, rate, mono);
             }
             // Small backward correction: slow down until it is absorbed.
-            let slowed = rate * (1.0 - SLEW);
-            self.slew_until = Some(mono + -diff / (rate * SLEW));
-            self.model = Some(Model { base_ms: current, at_mono: mono, playing: true, rate: slowed });
-            return Some(Write { position_ms: current, playing: true, rate: slowed });
+            return Some(self.start_slew(current, diff, rate, mono));
         }
         self.end_slew_if_due(mono)
+    }
+
+    /// Run the clock slow from `current` until a backward error `diff` (< 0) is absorbed.
+    fn start_slew(&mut self, current: f64, diff: f64, rate: f64, mono: f64) -> Write {
+        let slowed = rate * (1.0 - SLEW);
+        self.slew_until = Some(mono + -diff / (rate * SLEW));
+        self.model = Some(Model { base_ms: current, at_mono: mono, playing: true, rate: slowed });
+        Write { position_ms: current, playing: true, rate: slowed }
     }
 
     fn end_slew_if_due(&mut self, mono: f64) -> Option<Write> {
@@ -339,10 +368,29 @@ mod tests {
     fn pause_uses_a_fresh_sample_or_freezes_in_place() {
         let mut c = Clock::new();
         up(&mut c, playing(tl(0.0, 0.0)), 0.0);
-        // Paused, and the player published where (no extrapolation while paused).
+        // Paused, and the player published a pause point close to the clock: freeze
+        // where the clock is rather than pull the lyrics back.
         let w = up(&mut c, paused(tl(3050.0, 3000.0)), 3100.0).unwrap();
-        assert_eq!(w, Write { position_ms: 3050.0, playing: false, rate: 1.0 });
-        assert_eq!(c.now(9000.0), Some(3050.0));
+        assert_eq!(w, Write { position_ms: 3100.0, playing: false, rate: 1.0 });
+        assert_eq!(c.now(9000.0), Some(3100.0));
+
+        // Spotify's pause sample ~1.1 s behind what it was playing: still no jump back,
+        // also when it arrives a poll after the pause itself.
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        let w = up(&mut c, paused(tl(23_900.0, 25_000.0)), 25_000.0).unwrap();
+        assert_eq!(w.position_ms, 25_000.0);
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        up(&mut c, paused(tl(0.0, 0.0)), 25_000.0);
+        assert_eq!(up(&mut c, paused(tl(23_900.0, 25_100.0)), 25_200.0), None);
+        assert_eq!(c.now(30_000.0), Some(25_000.0));
+
+        // Paused far from the clock: that is a seek, take it.
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        let w = up(&mut c, paused(tl(60_000.0, 3000.0)), 3000.0).unwrap();
+        assert_eq!(w.position_ms, 60_000.0);
 
         // Paused without a new sample: freeze where the clock is.
         let mut c = Clock::new();
@@ -363,6 +411,32 @@ mod tests {
         assert_eq!(c.now(14_000.0), Some(4000.0));
         // Then the player confirms it.
         assert_eq!(up(&mut c, playing(tl(3010.0, 13_000.0)), 14_000.0), None);
+    }
+
+    #[test]
+    fn resume_sample_corrects_like_any_other() {
+        // Resumed with a sample a little ahead of the pause point: jump forward to it.
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        up(&mut c, paused(tl(0.0, 0.0)), 25_000.0);
+        let w = up(&mut c, playing(tl(25_300.0, 35_000.0)), 35_000.0).unwrap();
+        assert_eq!(w.position_ms, 25_300.0);
+
+        // A little behind: resume from the pause point and slew, never back.
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        up(&mut c, paused(tl(0.0, 0.0)), 25_000.0);
+        let w = up(&mut c, playing(tl(24_600.0, 35_000.0)), 35_000.0).unwrap();
+        assert_eq!(w.position_ms, 25_000.0);
+        assert!(w.rate < 1.0);
+        assert!(c.now(36_000.0).unwrap() > 25_000.0);
+
+        // Far behind: a seek.
+        let mut c = Clock::new();
+        up(&mut c, playing(tl(0.0, 0.0)), 0.0);
+        up(&mut c, paused(tl(0.0, 0.0)), 25_000.0);
+        let w = up(&mut c, playing(tl(5_000.0, 35_000.0)), 35_000.0).unwrap();
+        assert_eq!(w.position_ms, 5_000.0);
     }
 
     #[test]
