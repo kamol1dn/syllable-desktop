@@ -10,7 +10,7 @@ repository.workspace = true
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-syllable-core = { version = "0.1.0", path = "../core" }
+syllable-core = { version = "2.0.0", path = "../core" }
 webview2-com = "0.39.1"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

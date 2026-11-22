@@ -555,7 +555,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syllable"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "syllable-audio",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-audio"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "realfft",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-core"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-lyrics"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-media"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "syllable-core",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-settings"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-taskbar"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-visualizer"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "syllable-core",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "syllable-wallpaper"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "serde_json",

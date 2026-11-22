@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-syllable-core = { version = "0.1.0", path = "../core" }
+syllable-core = { version = "2.0.0", path = "../core" }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
