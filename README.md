@@ -1,5 +1,7 @@
 # Syllable
 
+[![Build](https://github.com/kamol1dn/syllable-desktop/actions/workflows/build.yml/badge.svg)](https://github.com/kamol1dn/syllable-desktop/actions/workflows/build.yml)
+
 Word-by-word synced lyrics for whatever is playing on Windows — Spotify, YouTube in a
 browser, anything that shows up in the Windows media flyout — drawn on the taskbar, and
 full-screen as a **lyrics wallpaper** on the desktop and the lock screen.
@@ -61,6 +63,10 @@ cargo build --release
 
 The app is `target\release\syllable.exe`, self-contained apart from WebView2. A debug build
 (`cargo build`) keeps a console window showing the log.
+
+Keep the `assets\wallpaper` folder next to the exe — the build puts it there, and the
+desktop host loads the page from it. CI builds the same release on every push and uploads
+that pair as a zip; a `v*` tag publishes it to Releases.
 
 To start it with Windows, put a shortcut to the exe in `shell:startup` (Win+R →
 `shell:startup`).

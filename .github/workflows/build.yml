@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -56,7 +56,7 @@ jobs:
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
       - name: Upload the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: syllable-${{ steps.name.outputs.version }}-windows-x64
           path: dist/*.zip
@@ -65,7 +65,7 @@ jobs:
       - name: Upload debug symbols
         # The release profile strips the exe and writes line tables to the .pdb. Keep the
         # .pdb of every released build or its crash dumps cannot be read.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: syllable-${{ steps.name.outputs.version }}-pdb
           path: target/release/syllable.pdb
@@ -81,14 +81,14 @@ jobs:
 
     steps:
       - name: Download the build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: syllable-*
           merge-multiple: true
           path: dist
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.zip
