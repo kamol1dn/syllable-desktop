@@ -1,0 +1,23 @@
+[package]
+name = "syllable"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+syllable-audio = { version = "0.1.0", path = "../audio" }
+syllable-core = { version = "0.1.0", path = "../core" }
+syllable-lyrics = { version = "0.1.0", path = "../lyrics" }
+syllable-media = { version = "0.1.0", path = "../media" }
+syllable-settings = { version = "0.1.0", path = "../settings" }
+syllable-taskbar = { version = "0.1.0", path = "../taskbar" }
+syllable-visualizer = { version = "0.1.0", path = "../visualizer" }
+syllable-wallpaper = { version = "0.1.0", path = "../wallpaper" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_Security"] }
+
+[features]
+# Debug aid: page-heap-like guard allocator for Rust allocations (src/guard_heap.rs).
+guard-heap = ["windows/Win32_System_Memory", "windows/Win32_System_Environment"]
