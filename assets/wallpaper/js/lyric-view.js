@@ -80,23 +80,15 @@ const LyricsView = (() => {
     return words;
   }
 
-  // No word timing, main line: the words light up in a quick cascade when the line
-  // starts. It is an entrance, not a claim about when each word is sung.
-  function wordsCascade(text, start, end) {
-    const parts = splitWords(text);
-    const c = style.cascade;
-    const total = Math.min(c.maxMs, Math.max(0, end - start) * 0.4);
-    const step = parts.length > 1 ? Math.min(c.stepMs, total / (parts.length - 1)) : 0;
-    return parts.map((p, i) => ({
-      units: [{ start: start + i * step, end: start + i * step + c.wordMs, text: p.text, synth: true }],
-      space: p.space,
-    }));
-  }
-
-  // No word timing, background vocal: sweep across it evenly, by length.
-  function wordsEven(text, start, end) {
+  // No word timing: sweep across the line evenly, by length, so it fills as it is
+  // sung instead of lighting all at once. A line-synced line usually runs until the
+  // next one starts, through any instrumental after it, so the sweep is held to a singing pace
+  // (`msPerChar`) rather than stretched over a long instrumental tail.
+  const SWEEP_MS_PER_CHAR = 170;
+  function wordsEven(text, start, end, msPerChar) {
     const parts = splitWords(text);
     const chars = parts.reduce((n, p) => n + p.text.length, 0) || 1;
+    if (msPerChar) end = Math.min(end, start + Math.max(1200, chars * msPerChar));
     let at = start;
     return parts.map((p) => {
       const d = ((end - start) * p.text.length) / chars;
@@ -160,7 +152,7 @@ const LyricsView = (() => {
     const lyricRows = lines.map((l) => {
       const row = { gap: false, start: l.Start, end: Math.max(l.End, l.Start + 1), opp: !!l.Opposite, units: [], el: null, top: 0, h: 0, st: 0, d: -1, rtl: false };
       const text = String(l.Text || "");
-      const words = l.Sylls && l.Sylls.length ? wordsFromSylls(l.Sylls) : wordsCascade(text, l.Start, row.end);
+      const words = l.Sylls && l.Sylls.length ? wordsFromSylls(l.Sylls) : wordsEven(text, l.Start, row.end, SWEEP_MS_PER_CHAR);
       row.el = el("div", "row lyric lx-off" + (row.opp ? " opp" : ""));
       row.el.dataset.start = String(Math.round(l.Start));
       row.rtl = RTL.test(text);
@@ -299,7 +291,11 @@ const LyricsView = (() => {
     e = Math.round(e * 250) / 250;
     if (e !== u.e) {
       u.e = e;
-      u.el.style.transform = e ? `translateY(${(-U.lift * e).toFixed(4)}em) scale(${(1 + U.grow * e).toFixed(4)})` : "";
+      // 3D, so the unit is moved by the compositor: a 2D transform re-rasterises the
+      // text, which snaps to whole pixels and makes a 2-3 px lift move in visible
+      // steps. Kept (at 0) until the row retires, so the layer isn't created and
+      // dropped around every word.
+      u.el.style.transform = `translate3d(0, ${(-U.lift * e).toFixed(4)}em, 0) scale(${(1 + U.grow * e).toFixed(4)})`;
     }
   }
 
@@ -323,7 +319,7 @@ const LyricsView = (() => {
       if (e !== c.e) {
         c.e = e;
         const st = c.el.style;
-        st.transform = e ? `translate(${(c.off * H.spread * e).toFixed(4)}em, ${(-H.lift * e).toFixed(4)}em) scale(${(1 + H.grow * e).toFixed(4)})` : "";
+        st.transform = `translate3d(${(c.off * H.spread * e).toFixed(4)}em, ${(-H.lift * e).toFixed(4)}em, 0) scale(${(1 + H.grow * e).toFixed(4)})`;
         st.setProperty("--lx-g", (H.glow * e).toFixed(3));
       }
     }

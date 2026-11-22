@@ -14,9 +14,6 @@
 //     maxChars       longer chunks are left alone
 //     grow/lift      per-letter swell and rise     spread   letters drift apart, em
 //     glow           0..1 strength of the halo
-//   cascade        line-synced lyrics (no word timing): words light up one after another
-//     stepMs         delay between words           wordMs   time one word takes to light
-//     maxMs          cap for the whole cascade (also never longer than 40 % of the line)
 //   focus          de-emphasis of the lines around the current one
 //     reach          lines further than this all look the same
 //   scroll         how the list follows the current line
@@ -36,7 +33,6 @@ const LyricStyles = (() => {
     fill: { feather: 0.42 },
     unit: { lift: 0.045, grow: 0.018, attackMs: 190, releaseMs: 520, curve: "soft" },
     hold: { minMs: 780, fullMs: 2100, maxChars: 14, grow: 0.085, lift: 0.07, spread: 0.042, glow: 0.8 },
-    cascade: { stepMs: 46, wordMs: 260, maxMs: 620 },
     focus: { reach: 5 },
     scroll: { settle: 0.085, leadMs: 160 },
     gap: { minMs: 3200, outMs: 520 },
@@ -62,7 +58,6 @@ const LyricStyles = (() => {
     fill: { feather: 0.06 },
     unit: { lift: 0, grow: 0.07, attackMs: 150, releaseMs: 340, curve: "snap" },
     hold: { grow: 0.13, lift: 0.02, spread: 0.062, glow: 1 },
-    cascade: { stepMs: 60, wordMs: 170, maxMs: 700 },
     focus: { reach: 3 },
     scroll: { settle: 0.06, leadMs: 110 },
   });
@@ -74,7 +69,6 @@ const LyricStyles = (() => {
     fill: { feather: 1.1 },
     unit: { lift: 0, grow: 0, attackMs: 300, releaseMs: 900 },
     hold: { grow: 0.03, lift: 0, spread: 0.016, glow: 1 },
-    cascade: { stepMs: 80, wordMs: 520, maxMs: 1100 },
     focus: { reach: 6 },
     scroll: { settle: 0.13, leadMs: 240 },
   });
